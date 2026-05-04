@@ -40,6 +40,14 @@ try:
 except ImportError:
     ZENOH_AVAILABLE = False
 
+# Shown when transport=zenoh but eclipse-zenoh is missing. Prefer uv pip so the
+# venv is not narrowed to base+zenoh only (uv sync --extra zenoh drops other extras).
+ZENOH_INSTALL_HINT = (
+    "Install with: uv pip install 'eclipse-zenoh>=1.0.0,<2.0' "
+    "or uv pip install -e '.[zenoh]' from the repo. "
+    "uv sync --extra zenoh limits extras to zenoh and can remove other packages."
+)
+
 from dimos.protocol.pubsub.impl.lcmpubsub import LCM, PickleLCM, Topic as LCMTopic
 from dimos.protocol.pubsub.impl.rospubsub import DimosROS, ROSTopic
 from dimos.protocol.pubsub.impl.shmpubsub import BytesSharedMemory, PickleSharedMemory

@@ -187,12 +187,11 @@ def _default_pubsubs(config: Any = None) -> list[SubscribeAllCapable[Any, Any]]:
     """
     transport = getattr(config, "transport", None) or global_config.transport
     if transport == "zenoh":
-        from dimos.core.transport import ZENOH_AVAILABLE
+        from dimos.core.transport import ZENOH_AVAILABLE, ZENOH_INSTALL_HINT
 
         if not ZENOH_AVAILABLE:
             raise RuntimeError(
-                "transport='zenoh' but eclipse-zenoh is not installed. "
-                "Install with: uv sync --extra zenoh"
+                "transport='zenoh' but eclipse-zenoh is not installed. " + ZENOH_INSTALL_HINT
             )
         from dimos.protocol.pubsub.impl.zenohpubsub import Zenoh
 

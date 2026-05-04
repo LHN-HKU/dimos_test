@@ -30,7 +30,13 @@ from dimos.core.coordination.worker_manager_python import WorkerManagerPython
 from dimos.core.global_config import GlobalConfig, global_config
 from dimos.core.module import ModuleBase, ModuleSpec
 from dimos.core.resource import Resource
-from dimos.core.transport import ZENOH_AVAILABLE, LCMTransport, PubSubTransport, pLCMTransport
+from dimos.core.transport import (
+    ZENOH_AVAILABLE,
+    ZENOH_INSTALL_HINT,
+    LCMTransport,
+    PubSubTransport,
+    pLCMTransport,
+)
 from dimos.spec.utils import is_spec, spec_annotation_compliance, spec_structural_compliance
 from dimos.utils.generic import short_id
 from dimos.utils.logging_config import setup_logger
@@ -547,8 +553,7 @@ def _get_transport_for(blueprint: Blueprint, name: str, stream_type: type) -> Pu
     if global_config.transport == "zenoh":
         if not ZENOH_AVAILABLE:
             raise RuntimeError(
-                "transport='zenoh' but eclipse-zenoh is not installed. "
-                "Install with: uv sync --extra zenoh"
+                "transport='zenoh' but eclipse-zenoh is not installed. " + ZENOH_INSTALL_HINT
             )
         from dimos.core.transport import ZenohTransport, pZenohTransport
 

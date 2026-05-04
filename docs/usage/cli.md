@@ -82,8 +82,8 @@ dimos run unitree-go2-agentic --daemon
 # Replay with Rerun viewer
 dimos --replay --viewer rerun run unitree-go2
 
-# Replay Big Office data explicitly over Zenoh
-dimos --transport=zenoh --dtop --replay --replay-dir=unitree_go2_bigoffice run unitree-go2
+# Replay Big Office (on Linux use --transport=zenoh; on macOS Zenoh is default when installed)
+dimos --transport=zenoh --dtop --replay --replay-db=go2_bigoffice run unitree-go2
 
 # Real robot
 dimos run unitree-go2-agentic --robot-ip 192.168.123.161

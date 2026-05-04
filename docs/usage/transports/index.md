@@ -48,6 +48,54 @@ On macOS, large replay workloads can be unreliable over LCM UDP. If Zenoh is ins
 
 ---
 
+## Zenoh quickstart
+
+Zenoh comes from the **`zenoh`** optional extra (`eclipse-zenoh`).
+
+Repo devs who run `uv sync --all-extras --no-extra dds` (`uv sync --all-extras --no-extra dds --no-extra cuda` on mac) (see [Developing on DimOS](/docs/installation/osx.md#developing-on-dimos)) already pull in **`zenoh`** among the extras, so no extra step.
+
+Otherwise add only the Zenoh wheel (same constraint as the `zenoh` extra in `pyproject.toml`; does not edit `pyproject.toml`):
+
+```bash
+uv pip install 'eclipse-zenoh>=1.0.0,<2.0'
+```
+
+From a checkout, install the project editable with the optional group:
+
+```bash
+uv pip install -e ".[zenoh]"
+```
+
+Only use `uv sync --extra zenoh` when you intend to **sync the environment to default plus the `zenoh` extra only**; that can **uninstall** packages from other extras you used before. See the [macOS install page](/docs/installation/osx.md) if you rely on a wide optional set.
+
+**Default global stream transport** (only applies when you do not pass `--transport` or set `DIMOS_TRANSPORT`):
+
+| Situation | Default |
+|-----------|---------|
+| macOS and the `eclipse-zenoh` package is importable | `zenoh` |
+| Any other platform, or Zenoh not installed | `lcm` |
+
+**Two ways to override for one run or for your shell:**
+
+1. **CLI:** `dimos --transport=zenoh ...` or `dimos --transport=lcm ...` (see [CLI](/docs/usage/cli.md) for precedence with `.env` and blueprints).
+2. **Environment:** `DIMOS_TRANSPORT=zenoh` or `DIMOS_TRANSPORT=lcm`.
+
+Typical **replay on macOS** when Zenoh is installed (default is already Zenoh, so no transport flag is required):
+
+```bash
+dimos --dtop --replay --replay-db=go2_bigoffice run unitree-go2
+```
+
+The same workload on **Linux** (default remains `lcm` until you opt in):
+
+```bash
+dimos --transport=zenoh --dtop --replay --replay-db=go2_bigoffice run unitree-go2
+```
+
+Architecture notes (Rerun bridge, TF still on LCM) live under [Zenoh](#zenoh) in PubSub transports below.
+
+---
+
 ## Benchmarks
 
 Quick view on performance of our pubsub backends:
@@ -294,11 +342,7 @@ Use Zenoh when:
 * you are replaying large or high-rate data and want a more reliable network path
 * you want to keep the DimOS typed stream model while changing the transport backend
 
-At the stream level, the transport wrappers are `ZenohTransport` and `pZenohTransport`. At the CLI level, the usual entry point is:
-
-```bash
-dimos --transport=zenoh --dtop --replay --replay-dir=unitree_go2_bigoffice run unitree-go2
-```
+At the stream level, the transport wrappers are `ZenohTransport` and `pZenohTransport`. Install, defaults, and CLI versus environment overrides are in the [Zenoh quickstart](#zenoh-quickstart) above.
 
 The Rerun bridge also follows the global transport. When `transport=zenoh`, the bridge listens on Zenoh and on LCM for TF data.
 
