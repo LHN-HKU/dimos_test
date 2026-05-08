@@ -19,8 +19,8 @@ Tests the conditional logic added to support Zenoh alongside LCM:
 - _get_transport_for() branching
 - LCM system configurators always run with blueprint checks (LCM is used outside transport_map)
 
-Requires the ``zenoh`` extra (``eclipse-zenoh``): ``ZenohTransport`` is only defined
-when that dependency is installed, so this module does not load without it.
+Requires the ``zenoh`` extra (``eclipse-zenoh``). When it is missing, pytest skips
+this module via ``importorskip`` so collection does not fail on ``ZenohTransport`` imports.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from typing import cast
 import numpy as np
 from pydantic import ValidationError
 import pytest
+
+pytest.importorskip("zenoh")
 
 from dimos.constants import ZENOH_DIMOS_KEY_PREFIX
 from dimos.core.coordination.blueprints import autoconnect
