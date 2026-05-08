@@ -76,7 +76,11 @@ class HostedTeleopConfig(ModuleConfig):
     # Broker — the microservice that mediates SDP exchange with Cloudflare
     # Realtime. Robots and operators only ever talk to this; Cloudflare
     # credentials live on the broker.
-    broker_url: str = "https://teleop.dimensional-apps.com"
+    # Production: https://teleop.dimensionalos.com (deployed from
+    # https://github.com/dimensionalOS/dimensional-teleop)
+    # Local dev:  http://localhost:8000 (dev_broker.py)
+    #             or http://localhost:8450 (dimensional-teleop run locally)
+    broker_url: str = "https://teleop.dimensionalos.com"
     broker_api_key: str = ""
 
     # Robot identity for the broker's session list.

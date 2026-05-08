@@ -3,210 +3,420 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DimOS Teleop (Hosted)</title>
+    <title>DimOS Teleop</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: { extend: { colors: {
+                dim: { 50:'#f0f9ff',100:'#e0f2fe',500:'#0ea5e9',600:'#0284c7',700:'#0369a1',900:'#0c4a6e' }
+            }}}
+        }
+    </script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #fff; color: #333;
-            display: flex; flex-direction: column;
-            align-items: center; justify-content: center;
-            height: 100vh; overflow: hidden;
-        }
-        #ui {
-            position: absolute; inset: 0;
-            display: flex; flex-direction: column;
-            align-items: center; justify-content: center;
-            z-index: 100; gap: 16px;
-        }
-        h1 { font-size: 36px; font-weight: 600; color: #28283b; }
-        h2 { font-size: 18px; font-weight: 400; color: #6c757d; margin-bottom: 16px; }
-        #status {
-            font-size: 22px; font-weight: 500; color: #0077b6;
-            padding: 12px 24px; border: 2px solid #0077b6; border-radius: 12px;
-            min-width: 320px; text-align: center;
-        }
-        input, select {
-            font-size: 16px; padding: 10px 14px;
-            border: 1px solid #ccc; border-radius: 8px;
-            width: 360px; text-align: left;
-        }
-        button {
-            padding: 16px 36px; font-size: 20px; font-weight: 600;
-            color: white; background: #0077b6; border: none; border-radius: 12px;
-            cursor: pointer; transition: background-color .2s;
-        }
-        button:hover { background: #005f8a; }
-        button:disabled { background: #adb5bd; cursor: not-allowed; }
-        button.secondary { background: #6c757d; }
-        button.secondary:hover { background: #545b62; }
-        #canvas {
-            display: none; position: absolute; inset: 0;
-            width: 100%; height: 100%;
-        }
-        .hidden { display: none !important; }
-        .row { display: flex; gap: 8px; align-items: center; }
+        body { font-family: 'Inter', system-ui, sans-serif; }
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .key-reveal { font-family: 'JetBrains Mono', monospace; word-break: break-all; }
+        #canvas { display: none; position: absolute; inset: 0; width: 100%; height: 100%; }
     </style>
 </head>
-<body>
-    <div id="ui">
-        <h1>DimOS Teleop</h1>
-        <h2>Hosted client (Cloudflare Realtime)</h2>
-        <div id="status">Ready</div>
-
-        <input id="broker-input" type="text" placeholder="Broker URL (https://teleop.dimensional-apps.com)" />
-        <input id="email-input" type="email" placeholder="Email" />
-        <input id="password-input" type="password" placeholder="Password" />
-        <div class="row">
-            <button id="loginBtn" onclick="login()">Log in</button>
-            <button id="refreshBtn" class="hidden" onclick="refreshRobots()">List robots</button>
-        </div>
-        <select id="robot-select" class="hidden"></select>
-        <button id="connectBtn" class="hidden" onclick="connect()">Connect</button>
-        <button id="disconnectBtn" class="hidden secondary" onclick="disconnect()">Disconnect</button>
-    </div>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+    <div id="app"></div>
     <canvas id="canvas"></canvas>
 
     <script type="module">
-        window.onerror = (msg, url, line, col, error) => {
-            console.error(`[ERROR] ${msg} at ${url}:${line}:${col}`, error);
-            document.getElementById('status').textContent = `Error: ${msg}`;
-        };
-
         import { geometry_msgs, std_msgs, sensor_msgs } from "https://esm.sh/jsr/@dimos/msgs@0.1.4";
 
-        // State
+        // ─── State ──────────────────────────────────────────────────────────
+        let token = localStorage.getItem('teleop_token') || '';
+        let userEmail = localStorage.getItem('teleop_email') || '';
+
+        // The broker is always the origin this page was served from. We do
+        // NOT accept a ?broker= override — that would be a credential-
+        // exfiltration vector (the login form would POST to whatever URL an
+        // attacker put in the query string). For local dev, run dev_broker.py
+        // which serves this HTML at /teleop on the same origin.
+
+        // WebRTC + WebXR state
         let pc = null;
         let cmdChannel = null;
         let xrSession = null;
         let xrRefSpace = null;
         let gl = null;
         let lastSendTime = 0;
-        const sendInterval = 1000 / 80; // 80 Hz
+        let activeRobot = null;
+        const sendInterval = 1000 / 80;
 
-        // UI elements
-        const statusEl = document.getElementById('status');
-        const brokerInput = document.getElementById('broker-input');
-        const emailInput = document.getElementById('email-input');
-        const passwordInput = document.getElementById('password-input');
-        const loginBtn = document.getElementById('loginBtn');
-        const refreshBtn = document.getElementById('refreshBtn');
-        const robotSelect = document.getElementById('robot-select');
-        const connectBtn = document.getElementById('connectBtn');
-        const disconnectBtn = document.getElementById('disconnectBtn');
-        const canvas = document.getElementById('canvas');
-
-        let jwt = '';
-
-        const urlParams = new URLSearchParams(window.location.search);
-        brokerInput.value = urlParams.get('broker') || localStorage.getItem('dimos_broker') || '';
-        emailInput.value = urlParams.get('email') || localStorage.getItem('dimos_email') || '';
-
-        function setStatus(msg) { statusEl.textContent = msg; }
-
-        function authHeaders() {
-            return jwt ? { 'Authorization': `Bearer ${jwt}` } : {};
+        // ─── API helpers ────────────────────────────────────────────────────
+        async function api(method, path, body = null) {
+            const opts = { method, headers: { 'Content-Type': 'application/json' } };
+            if (token) opts.headers['Authorization'] = `Bearer ${token}`;
+            if (body) opts.body = JSON.stringify(body);
+            const res = await fetch(`/api/v1${path}`, opts);
+            if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+            return data;
         }
 
-        function brokerUrl() {
-            const b = brokerInput.value.trim().replace(/\/$/, '');
-            if (!b) throw new Error('Enter the broker URL');
-            return b;
+        function logout() {
+            localStorage.removeItem('teleop_token');
+            localStorage.removeItem('teleop_email');
+            token = '';
+            userEmail = '';
+            navigate('auth');
         }
 
-        // POST /api/v1/auth/login. If account doesn't exist (401), auto-register.
-        window.login = async function() {
+        function escHtml(s) {
+            return s ? String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) : '';
+        }
+
+        function timeAgo(iso) {
+            const diff = Date.now() - new Date(iso).getTime();
+            const mins = Math.floor(diff / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return `${mins}m ago`;
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return `${hrs}h ago`;
+            return `${Math.floor(hrs/24)}d ago`;
+        }
+
+        // ─── Router ─────────────────────────────────────────────────────────
+        function navigate(view) {
+            const app = document.getElementById('app');
+            if (view === 'auth') renderAuth(app);
+            else if (view === 'dashboard') renderDashboard(app);
+            else if (view === 'teleop') renderTeleop(app);
+        }
+
+        // ─── Auth view ──────────────────────────────────────────────────────
+        let authMode = 'login';
+
+        function renderAuth(c) {
+            c.innerHTML = `
+            <div class="min-h-screen flex items-center justify-center p-4">
+                <div class="w-full max-w-md">
+                    <div class="text-center mb-8">
+                        <h1 class="text-3xl font-bold text-white mb-2">DimOS Teleop</h1>
+                        <p class="text-gray-400">Remote robot teleoperation platform</p>
+                    </div>
+                    <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 shadow-xl">
+                        <div class="flex mb-6 bg-gray-800 rounded-lg p-1">
+                            <button id="tab-login" class="flex-1 py-2 px-4 rounded-md text-sm font-medium bg-dim-600 text-white">Log In</button>
+                            <button id="tab-register" class="flex-1 py-2 px-4 rounded-md text-sm font-medium text-gray-400 hover:text-white">Sign Up</button>
+                        </div>
+                        <form id="auth-form">
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-1">Email</label>
+                                    <input id="email" type="email" required value="${escHtml(userEmail)}"
+                                        class="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-dim-500"
+                                        placeholder="you@company.com">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-1">Password</label>
+                                    <input id="password" type="password" required
+                                        class="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-dim-500"
+                                        placeholder="••••••••">
+                                </div>
+                                <div id="auth-error" class="text-red-400 text-sm hidden"></div>
+                                <button type="submit" class="w-full py-2.5 bg-dim-600 hover:bg-dim-700 text-white font-medium rounded-lg transition-colors">
+                                    <span id="auth-btn-text">Log In</span>
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                    <p class="text-center text-gray-500 text-sm mt-6">
+                        Powered by <a href="https://dimensionalos.com" class="text-dim-500 hover:text-dim-400">DimensionalOS</a>
+                    </p>
+                </div>
+            </div>`;
+
+            document.getElementById('tab-login').onclick = () => showAuthTab('login');
+            document.getElementById('tab-register').onclick = () => showAuthTab('register');
+            document.getElementById('auth-form').onsubmit = handleAuth;
+        }
+
+        function showAuthTab(mode) {
+            authMode = mode;
+            const active = 'flex-1 py-2 px-4 rounded-md text-sm font-medium bg-dim-600 text-white';
+            const inactive = 'flex-1 py-2 px-4 rounded-md text-sm font-medium text-gray-400 hover:text-white';
+            document.getElementById('tab-login').className = mode === 'login' ? active : inactive;
+            document.getElementById('tab-register').className = mode === 'register' ? active : inactive;
+            document.getElementById('auth-btn-text').textContent = mode === 'login' ? 'Log In' : 'Create Account';
+        }
+
+        async function handleAuth(e) {
+            e.preventDefault();
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value;
+            const errEl = document.getElementById('auth-error');
+            errEl.classList.add('hidden');
             try {
-                loginBtn.disabled = true;
-                setStatus('Logging in...');
-                localStorage.setItem('dimos_broker', brokerInput.value.trim());
-                localStorage.setItem('dimos_email', emailInput.value.trim());
-
-                const creds = {
-                    email: emailInput.value.trim(),
-                    password: passwordInput.value,
-                };
-                if (!creds.email || !creds.password) {
-                    throw new Error('Enter email + password');
-                }
-
-                let resp = await fetch(`${brokerUrl()}/api/v1/auth/login`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(creds),
-                });
-                if (resp.status === 401) {
-                    // Auto-register on first run.
-                    setStatus('Creating account...');
-                    resp = await fetch(`${brokerUrl()}/api/v1/auth/register`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(creds),
-                    });
-                }
-                if (!resp.ok) throw new Error(`auth failed: ${resp.status}`);
-                const tokenData = await resp.json();
-                jwt = tokenData.token;
-
-                emailInput.classList.add('hidden');
-                passwordInput.classList.add('hidden');
-                loginBtn.classList.add('hidden');
-                refreshBtn.classList.remove('hidden');
-                setStatus(`Logged in as ${tokenData.user_id}`);
-            } catch (e) {
-                console.error(e);
-                setStatus(`Login failed: ${e.message}`);
-            } finally {
-                loginBtn.disabled = false;
+                const endpoint = authMode === 'login' ? '/auth/login' : '/auth/register';
+                const data = await api('POST', endpoint, { email, password });
+                token = data.token;
+                userEmail = data.user_id;
+                localStorage.setItem('teleop_token', token);
+                localStorage.setItem('teleop_email', userEmail);
+                navigate('dashboard');
+            } catch (err) {
+                errEl.textContent = err.message;
+                errEl.classList.remove('hidden');
             }
-        };
+        }
 
-        // GET /api/v1/sessions → populate robot dropdown
-        window.refreshRobots = async function() {
+        // ─── Dashboard view (API keys + robot list) ─────────────────────────
+        async function renderDashboard(c) {
+            c.innerHTML = `
+            <div class="max-w-4xl mx-auto p-6 fade-in">
+                <header class="flex items-center justify-between mb-8">
+                    <div>
+                        <h1 class="text-2xl font-bold text-white">Dashboard</h1>
+                        <p class="text-gray-400 text-sm">${escHtml(userEmail)}</p>
+                    </div>
+                    <button id="logoutBtn" class="px-4 py-2 text-sm text-gray-400 hover:text-white border border-gray-700 rounded-lg hover:border-gray-600 transition-colors">
+                        Log Out
+                    </button>
+                </header>
+
+                <!-- API Keys -->
+                <section class="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h2 class="text-lg font-semibold text-white">API Keys</h2>
+                            <p class="text-gray-400 text-sm">Authenticate your robots with the teleop service</p>
+                        </div>
+                        <button id="newKeyBtn" class="px-4 py-2 bg-dim-600 hover:bg-dim-700 text-white text-sm font-medium rounded-lg transition-colors">
+                            + New Key
+                        </button>
+                    </div>
+
+                    <div id="create-key-form" class="hidden mb-4 p-4 bg-gray-800 rounded-lg border border-gray-700">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                            <input id="key-name" type="text" placeholder="Key name (e.g. Lab Robot 01)"
+                                class="px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-dim-500">
+                            <input id="key-robot-id" type="text" placeholder="Robot ID (optional)"
+                                class="px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-dim-500">
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="generateKeyBtn" class="px-4 py-2 bg-dim-600 hover:bg-dim-700 text-white text-sm rounded-lg transition-colors">Generate Key</button>
+                            <button id="cancelKeyBtn" class="px-4 py-2 text-gray-400 hover:text-white text-sm rounded-lg transition-colors">Cancel</button>
+                        </div>
+                    </div>
+
+                    <div id="new-key-reveal" class="hidden mb-4 p-4 bg-green-900/20 border border-green-800 rounded-lg">
+                        <p class="text-green-400 text-sm font-medium mb-2">🔑 Key created! Copy it now — it won't be shown again.</p>
+                        <div class="flex items-center gap-2">
+                            <code id="new-key-value" class="key-reveal flex-1 px-3 py-2 bg-gray-900 rounded text-green-300 text-sm"></code>
+                            <button id="copyKeyBtn" class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm text-white transition-colors">Copy</button>
+                        </div>
+                        <p class="text-gray-500 text-xs mt-2">Use it as <code>broker_api_key</code> when starting <code>HostedTeleopModule</code>.</p>
+                    </div>
+
+                    <div id="keys-list" class="space-y-2">
+                        <div class="text-gray-500 text-sm py-4 text-center">Loading...</div>
+                    </div>
+                </section>
+
+                <!-- Connected robots -->
+                <section class="bg-gray-900 border border-gray-800 rounded-xl p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h2 class="text-lg font-semibold text-white">Available Robots</h2>
+                            <p class="text-gray-400 text-sm">Robots online — click Connect to teleoperate</p>
+                        </div>
+                        <button id="refreshRobotsBtn" class="px-4 py-2 text-sm text-gray-300 border border-gray-700 rounded-lg hover:bg-gray-800 transition-colors">
+                            Refresh
+                        </button>
+                    </div>
+                    <div id="robots-list" class="space-y-2">
+                        <div class="text-gray-500 text-sm py-4 text-center">Loading...</div>
+                    </div>
+                </section>
+
+                <p class="text-center text-xs text-gray-600 mt-6">
+                    Broker: <code>${escHtml(window.location.origin)}</code>
+                </p>
+            </div>`;
+
+            document.getElementById('logoutBtn').onclick = logout;
+            document.getElementById('newKeyBtn').onclick = () => document.getElementById('create-key-form').classList.remove('hidden');
+            document.getElementById('cancelKeyBtn').onclick = () => document.getElementById('create-key-form').classList.add('hidden');
+            document.getElementById('generateKeyBtn').onclick = createKey;
+            document.getElementById('copyKeyBtn').onclick = copyKey;
+            document.getElementById('refreshRobotsBtn').onclick = loadRobots;
+
+            await Promise.all([loadKeys(), loadRobots()]);
+        }
+
+        // ─── API Keys ───────────────────────────────────────────────────────
+        async function createKey() {
+            const name = document.getElementById('key-name').value.trim();
+            const robotId = document.getElementById('key-robot-id').value.trim() || null;
+            if (!name) { alert('Please provide a key name'); return; }
             try {
-                refreshBtn.disabled = true;
-                setStatus('Fetching robot list...');
+                const data = await api('POST', '/keys', { name, robot_id: robotId });
+                document.getElementById('new-key-value').textContent = data.api_key;
+                document.getElementById('new-key-reveal').classList.remove('hidden');
+                document.getElementById('create-key-form').classList.add('hidden');
+                document.getElementById('key-name').value = '';
+                document.getElementById('key-robot-id').value = '';
+                await loadKeys();
+            } catch (err) {
+                alert('Failed to create key: ' + err.message);
+            }
+        }
 
-                const resp = await fetch(`${brokerUrl()}/api/v1/sessions`, {
-                    headers: { ...authHeaders() }
-                });
-                if (!resp.ok) throw new Error(`broker returned ${resp.status}`);
-                const robots = await resp.json();
+        function copyKey() {
+            const key = document.getElementById('new-key-value').textContent;
+            navigator.clipboard.writeText(key);
+            const btn = document.getElementById('copyKeyBtn');
+            btn.textContent = 'Copied!';
+            setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+        }
 
-                robotSelect.innerHTML = '';
-                if (!Array.isArray(robots) || robots.length === 0) {
-                    setStatus('No robots online');
-                    robotSelect.classList.add('hidden');
-                    connectBtn.classList.add('hidden');
+        async function loadKeys() {
+            const listEl = document.getElementById('keys-list');
+            try {
+                const data = await api('GET', '/keys');
+                if (!data.keys || data.keys.length === 0) {
+                    listEl.innerHTML = '<p class="text-gray-500 text-sm py-4 text-center">No API keys yet. Create one to connect a robot.</p>';
                     return;
                 }
-                for (const r of robots) {
-                    const opt = document.createElement('option');
-                    opt.value = r.session_id;
-                    opt.textContent = `${r.robot_name || r.robot_id || r.session_id}`;
-                    robotSelect.appendChild(opt);
+                listEl.innerHTML = data.keys.map(k => `
+                    <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2">
+                                <span class="text-white text-sm font-medium">${escHtml(k.name)}</span>
+                                ${k.robot_id ? `<span class="text-xs px-2 py-0.5 bg-gray-700 rounded text-gray-300">${escHtml(k.robot_id)}</span>` : ''}
+                            </div>
+                            <div class="flex items-center gap-3 mt-1">
+                                <code class="text-gray-400 text-xs">${escHtml(k.key_prefix)}...</code>
+                                <span class="text-gray-600 text-xs">${k.last_used_at ? 'Last used ' + timeAgo(k.last_used_at) : 'Never used'}</span>
+                            </div>
+                        </div>
+                        <button data-id="${k.id}" data-name="${escHtml(k.name)}"
+                            class="revoke-btn px-3 py-1.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded transition-colors">
+                            Revoke
+                        </button>
+                    </div>
+                `).join('');
+                listEl.querySelectorAll('.revoke-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        revokeKey(e.target.dataset.id, e.target.dataset.name);
+                    });
+                });
+            } catch (err) {
+                listEl.innerHTML = `<p class="text-red-400 text-sm">${escHtml(err.message)}</p>`;
+            }
+        }
+
+        async function revokeKey(id, name) {
+            if (!confirm(`Revoke key "${name}"? This cannot be undone.`)) return;
+            try {
+                await api('DELETE', `/keys/${id}`);
+                document.getElementById('new-key-reveal').classList.add('hidden');
+                await loadKeys();
+            } catch (err) {
+                alert('Failed to revoke: ' + err.message);
+            }
+        }
+
+        // ─── Robot list ─────────────────────────────────────────────────────
+        async function loadRobots() {
+            const listEl = document.getElementById('robots-list');
+            try {
+                const robots = await api('GET', '/sessions');
+                // Broker returns a flat list per sessions.py:list_sessions response_model.
+                const arr = Array.isArray(robots) ? robots : (robots.sessions || []);
+                if (arr.length === 0) {
+                    listEl.innerHTML = '<p class="text-gray-500 text-sm py-4 text-center">No robots online. Start a robot with a registered API key.</p>';
+                    return;
                 }
-                robotSelect.classList.remove('hidden');
-                connectBtn.classList.remove('hidden');
-                setStatus(`${robots.length} robot(s) available`);
+                listEl.innerHTML = arr.map(s => `
+                    <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                        <div class="flex items-center gap-3">
+                            <div class="w-2 h-2 rounded-full ${s.state === 'active' ? 'bg-green-400' : s.state === 'idle' ? 'bg-yellow-400' : 'bg-gray-500'}"></div>
+                            <div>
+                                <span class="text-white text-sm font-medium">${escHtml(s.robot_name)}</span>
+                                <span class="text-gray-500 text-xs ml-2">${escHtml(s.robot_id)}</span>
+                                ${s.rtt_ms ? `<span class="text-gray-500 text-xs ml-2">${Math.round(s.rtt_ms)}ms</span>` : ''}
+                            </div>
+                        </div>
+                        <button data-id="${s.session_id}" data-name="${escHtml(s.robot_name)}"
+                            class="connect-btn px-4 py-2 bg-dim-600 hover:bg-dim-700 text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            ${s.state === 'active' ? 'disabled' : ''}>
+                            ${s.state === 'active' ? 'Busy' : 'Connect'}
+                        </button>
+                    </div>
+                `).join('');
+                listEl.querySelectorAll('.connect-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        connectToRobot(e.target.dataset.id, e.target.dataset.name);
+                    });
+                });
+            } catch (err) {
+                listEl.innerHTML = `<p class="text-red-400 text-sm py-4 text-center">${escHtml(err.message)}</p>`;
+            }
+        }
+
+        // ─── Connect (called from Connect button — user-gesture context) ────
+        async function connectToRobot(sessionId, robotName) {
+            activeRobot = { session_id: sessionId, robot_name: robotName };
+            try {
+                if (!navigator.xr) throw new Error('WebXR not supported. Use Quest 3 browser.');
+
+                navigate('teleop');
+                // VR FIRST — gesture activation must be alive when requestSession() runs.
+                await startVR();
+
+                try {
+                    await setupWebRTC(sessionId);
+                } catch (rtcError) {
+                    if (xrSession) { await xrSession.end().catch(() => {}); xrSession = null; }
+                    throw rtcError;
+                }
+                setStatus(`Connected — ${robotName}`);
             } catch (e) {
                 console.error(e);
-                setStatus(`List failed: ${e.message}`);
-            } finally {
-                refreshBtn.disabled = false;
+                setStatus(`Connection failed: ${e.message}`);
+                setTimeout(() => navigate('dashboard'), 3000);
             }
-        };
+        }
 
+        // ─── Teleop view ────────────────────────────────────────────────────
+        function renderTeleop(c) {
+            c.innerHTML = `
+            <div class="min-h-screen flex flex-col items-center justify-center p-6 fade-in">
+                <div class="w-full max-w-md text-center">
+                    <h1 class="text-3xl font-bold text-white mb-2">${escHtml(activeRobot?.robot_name || 'Teleop')}</h1>
+                    <div id="teleop-status" class="text-lg text-gray-300 px-4 py-3 bg-gray-900 border border-gray-800 rounded-lg my-4">
+                        Negotiating...
+                    </div>
+                    <button id="disconnectBtn" class="mt-4 px-6 py-2.5 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-lg transition-colors">
+                        Disconnect
+                    </button>
+                </div>
+            </div>`;
+            document.getElementById('disconnectBtn').onclick = disconnect;
+        }
+
+        function setStatus(msg) {
+            const el = document.getElementById('teleop-status');
+            if (el) el.textContent = msg;
+        }
+
+        // ─── WebRTC ─────────────────────────────────────────────────────────
         async function setupWebRTC(sessionId) {
             setStatus('Negotiating WebRTC...');
             pc = new RTCPeerConnection({
                 iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }]
             });
 
-            // Operator → robot. UDP-like, drop stale frames.
             cmdChannel = pc.createDataChannel('cmd_unreliable', {
                 ordered: false,
-                maxRetransmits: 0
+                maxRetransmits: 0,
             });
             cmdChannel.binaryType = 'arraybuffer';
 
@@ -224,6 +434,7 @@
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
+            // Non-trickle ICE
             await new Promise(resolve => {
                 if (pc.iceGatheringState === 'complete') return resolve();
                 pc.onicegatheringstatechange = () => {
@@ -231,20 +442,13 @@
                 };
             });
 
-            const resp = await fetch(`${brokerUrl()}/api/v1/sessions/${sessionId}/join`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify({
-                    role: 'operator',
-                    sdp_offer: pc.localDescription.sdp
-                })
+            const data = await api('POST', `/sessions/${sessionId}/join`, {
+                role: 'operator',
+                sdp_offer: pc.localDescription.sdp,
             });
-            if (!resp.ok) throw new Error(`broker join failed: ${resp.status}`);
-            const data = await resp.json();
             await pc.setRemoteDescription({ type: 'answer', sdp: data.sdp_answer });
 
             await opened;
-            setStatus('Connected');
         }
 
         function send(bytes) {
@@ -253,7 +457,9 @@
             }
         }
 
+        // ─── WebXR ──────────────────────────────────────────────────────────
         function initGL() {
+            const canvas = document.getElementById('canvas');
             gl = canvas.getContext('webgl', { xrCompatible: true, alpha: true });
             if (!gl) throw new Error('WebGL not supported');
             gl.clearColor(0, 0, 0, 0);
@@ -276,21 +482,17 @@
                 const pos = pose.transform.position;
                 const rot = pose.transform.orientation;
                 const nowMs = Date.now();
+                const stamp = new std_msgs.Time({
+                    sec: Math.floor(nowMs / 1000),
+                    nsec: (nowMs % 1000) * 1_000_000,
+                });
 
                 const poseStamped = new geometry_msgs.PoseStamped({
-                    header: new std_msgs.Header({
-                        stamp: new std_msgs.Time({
-                            sec: Math.floor(nowMs / 1000),
-                            nsec: (nowMs % 1000) * 1_000_000
-                        }),
-                        frame_id: handedness
-                    }),
+                    header: new std_msgs.Header({ stamp, frame_id: handedness }),
                     pose: new geometry_msgs.Pose({
                         position: new geometry_msgs.Point({ x: pos.x, y: pos.y, z: pos.z }),
-                        orientation: new geometry_msgs.Quaternion({
-                            x: rot.x, y: rot.y, z: rot.z, w: rot.w
-                        })
-                    })
+                        orientation: new geometry_msgs.Quaternion({ x: rot.x, y: rot.y, z: rot.z, w: rot.w }),
+                    }),
                 });
                 send(poseStamped.encode());
 
@@ -300,24 +502,18 @@
                         gamepad.axes[0] ?? 0.0,
                         gamepad.axes[1] ?? 0.0,
                         gamepad.buttons[0]?.value ?? 0.0,
-                        gamepad.buttons[1]?.value ?? 0.0
+                        gamepad.buttons[1]?.value ?? 0.0,
                     ];
                     const buttons = [];
                     for (let i = 0; i < gamepad.buttons.length; i++) {
                         buttons.push(gamepad.buttons[i]?.pressed ? 1 : 0);
                     }
                     const joyMsg = new sensor_msgs.Joy({
-                        header: new std_msgs.Header({
-                            stamp: new std_msgs.Time({
-                                sec: Math.floor(nowMs / 1000),
-                                nsec: (nowMs % 1000) * 1_000_000
-                            }),
-                            frame_id: handedness
-                        }),
+                        header: new std_msgs.Header({ stamp, frame_id: handedness }),
                         axes_length: axes.length,
                         buttons_length: buttons.length,
-                        axes: axes,
-                        buttons: buttons
+                        axes,
+                        buttons,
                     });
                     send(joyMsg.encode());
                 }
@@ -332,79 +528,57 @@
         }
 
         async function startVR() {
-            setStatus('Initializing WebGL...');
+            const canvas = document.getElementById('canvas');
+            canvas.style.display = 'block';
             initGL();
-            setStatus('Requesting VR session...');
+
             let session = null;
             try {
                 session = await navigator.xr.requestSession('immersive-ar', {
                     requiredFeatures: ['local-floor'],
-                    optionalFeatures: ['hand-tracking']
+                    optionalFeatures: ['hand-tracking'],
                 });
             } catch (e) {
                 session = await navigator.xr.requestSession('immersive-vr', {
                     requiredFeatures: ['local-floor'],
-                    optionalFeatures: ['hand-tracking']
+                    optionalFeatures: ['hand-tracking'],
                 });
             }
+
             xrSession = session;
             const glLayer = new XRWebGLLayer(session, gl);
             await session.updateRenderState({ baseLayer: glLayer });
             xrRefSpace = await session.requestReferenceSpace('local-floor');
-            setStatus('VR active');
+
             session.addEventListener('end', () => {
-                setStatus('VR session ended');
                 xrSession = null;
                 disconnect();
             });
             session.requestAnimationFrame(onXRFrame);
         }
 
-        window.connect = async function() {
+        // ─── Disconnect ─────────────────────────────────────────────────────
+        async function disconnect() {
             try {
-                connectBtn.disabled = true;
-                if (!navigator.xr) throw new Error('WebXR not supported. Use Quest 3 browser.');
-                const sessionId = robotSelect.value;
-                if (!sessionId) throw new Error('Pick a robot first');
-
-                // Start VR FIRST while the user-gesture activation is still
-                // fresh. WebXR requires requestSession() inside the gesture;
-                // setupWebRTC's awaits would otherwise consume the token.
-                // Pose/joy frames sent before the channel is open are no-ops
-                // (processTracking gates on cmdChannel.readyState).
-                await startVR();
-
-                try {
-                    await setupWebRTC(sessionId);
-                } catch (rtcError) {
-                    if (xrSession) { await xrSession.end().catch(() => {}); xrSession = null; }
-                    throw rtcError;
+                if (activeRobot && token) {
+                    api('POST', `/sessions/${activeRobot.session_id}/leave`, { reason: 'user_initiated' })
+                        .catch(() => {});
                 }
+            } catch (_) {}
 
-                connectBtn.classList.add('hidden');
-                disconnectBtn.classList.remove('hidden');
-                refreshBtn.classList.add('hidden');
-                robotSelect.classList.add('hidden');
-                brokerInput.classList.add('hidden');
-            } catch (e) {
-                setStatus(`Connection failed: ${e.message}`);
-                console.error(e);
-                connectBtn.disabled = false;
-            }
-        };
-
-        window.disconnect = async function() {
-            setStatus('Disconnecting...');
-            if (xrSession) { await xrSession.end().catch(console.error); xrSession = null; }
+            if (xrSession) { await xrSession.end().catch(() => {}); xrSession = null; }
             if (cmdChannel) { try { cmdChannel.close(); } catch (_) {} cmdChannel = null; }
-            if (pc)         { try { pc.close(); }         catch (_) {} pc = null; }
-            connectBtn.classList.remove('hidden');
-            connectBtn.disabled = false;
-            disconnectBtn.classList.add('hidden');
-            refreshBtn.classList.remove('hidden');
-            brokerInput.classList.remove('hidden');
-            setStatus('Ready');
-        };
+            if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+
+            const canvas = document.getElementById('canvas');
+            canvas.style.display = 'none';
+            activeRobot = null;
+            navigate('dashboard');
+        }
+
+        // ─── Init ───────────────────────────────────────────────────────────
+        if (token) navigate('dashboard');
+        else navigate('auth');
     </script>
 </body>
 </html>
