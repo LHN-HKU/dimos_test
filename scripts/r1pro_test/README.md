@@ -59,19 +59,64 @@ cd ~/galaxea/install/startup_config/share/startup_config/script
 
 # Step 3: Wait ~30 seconds for HDAS to fully init (arms open/close = healthy)
 
-# Step 4: Start chassis gatekeeper (required for chassis control from laptop)
+# Step 4: Launch Livox MID360 LiDAR driver
+#   The R1PROBody.d session config does NOT include the lidar launch — you have
+#   to start it by hand each session, otherwise /hdas/lidar_chassis_left has
+#   zero publishers and the chassis adapter sits subscribed to silence.
+#   Hardware is at 192.168.2.100; verify reachable with `ping 192.168.2.100`.
+bash ~/galaxea/install/startup_config/share/startup_config/script/boot/modules/hdas/start_livox_lidar.sh
+
+# Step 5: Verify the head depth stream
+#   The signal_camera_head launch publishes RGB but sometimes does NOT publish
+#   /hdas/camera_head/depth/depth_registered. If `ros2 topic info` shows 0
+#   publishers on that topic, restart the head signal camera launch:
+#   bash ~/galaxea/install/startup_config/share/startup_config/script/boot/modules/hdas/start_signal_camera_head.sh
+
+# Step 6: Start chassis gatekeeper (required for chassis control from laptop)
 source ~/galaxea/install/setup.bash
 export ROS_DOMAIN_ID=41
 python3 ~/chassis_gatekeeper.py
 ```
 
 ```bash
-# Step 5: Verify all topics are up (use --no-daemon, the daemon is unreliable)
+# Step 7: Verify everything is publishing (run on the robot or laptop)
 source ~/galaxea/install/setup.bash
 export ROS_DOMAIN_ID=41
-ros2 topic list --no-daemon | grep hdas | head -5
-# Expected: /hdas/feedback_arm_left, /hdas/feedback_arm_right, etc.
+ros2 topic list --no-daemon | grep -E 'hdas|lidar' | head -20
+# Expected: /hdas/feedback_arm_left, /hdas/feedback_arm_right, /hdas/lidar_chassis_left, etc.
+
+# Spot-check rates on the streams the chassis adapter consumes:
+ros2 topic hz /hdas/lidar_chassis_left                                    # ~10 Hz
+ros2 topic hz /hdas/camera_wrist_left/color/image_raw/compressed          # ~15 Hz
+ros2 topic hz /hdas/camera_wrist_right/color/image_raw/compressed         # ~15 Hz
+ros2 topic hz /hdas/camera_head/left_raw/image_raw_color/compressed       # ~15 Hz
 ```
+
+### Sensors that should auto-start (and what to do when they don't)
+
+`robot_startup.sh` reads sessions from `R1PROBody.d/` and runs each entry's
+launch script. On a clean boot the session brings up:
+
+- **HDAS** (CAN-side: arms, torso, chassis, grippers, IMUs) via
+  `start_hdas_r1pro.sh`
+- **RealSense wrist cameras** (left + right D405) via
+  `start_realsense_camera_r1pro.sh` — reads serials from
+  `/opt/galaxea/sensor/realsense/RS_LEFT` and `RS_RIGHT`
+- **Head signal camera** (head RGB stereo + depth) via
+  `start_signal_camera_head.sh`
+
+The session does NOT bring up the **Livox MID360 LiDAR** — Step 4 above is the
+manual workaround. If you want it to launch automatically, add a session
+entry under `~/galaxea/install/startup_config/share/startup_config/script/sessions.d/ATCStandard/R1PROBody.d/`
+that invokes
+`~/galaxea/install/startup_config/share/startup_config/script/boot/modules/hdas/start_livox_lidar.sh`
+(this hasn't been pushed upstream — keep the manual step in sync until that
+session config gets fixed on the robot).
+
+If a wrist camera reports `RS2_USB_STATUS_BUSY` or repeatedly disconnects
+(check `~/.ros/log/realsense2_camera_node_*_*.log`), it's a USB-layer fault
+— reseat the cable on that camera and rerun
+`start_realsense_camera_r1pro.sh`.
 
 ### Robot tmux sessions
 | Session | Purpose |
@@ -516,49 +561,70 @@ for completeness but isn't required for Rerun and is the less-tested path.
 
 ---
 
-### 8. Rerun port collision with the VS Code Rerun extension
+### 8. Why `rr.spawn()` silently fails inside the dev container
 
-**Symptom** — `python scripts/r1pro_test/run_rerun_bridge.py --mode web` failed
-with:
+**Symptom** — `python scripts/r1pro_test/run_rerun_bridge.py` (the older
+version that called `rr.spawn(port=9876)`) runs without error, prints "Rerun
+viewer should open", but no window appears. Switching to non-default ports
+(19876, 28765, …) doesn't help; each one is also "already in use" the
+moment we pick it. The bridge logs a backpressure warning a few seconds
+later (`Sender has been blocked for over 5 seconds…`) — data is going
+nowhere.
 
+**Diagnostic** — on the laptop host:
+
+```bash
+sudo ss -tlnp '( sport = :9876 )'
+# users:(("code",pid=358077,fd=44))   ← VS Code extension host has the port
 ```
-re_grpc_server ERROR message proxy server crashed: Address already in use (os error 98)
-RuntimeError: Failed to create server at address 0.0.0.0:9090: Address already in use
+
+The same `code` PID (a `code --type=utility` Node service) shows up holding
+*every* rerun-ish port we've ever used — 9876, 9090, 19876, 28765, etc. —
+including ones we made up moments earlier. Fresh, never-seen ports (e.g.
+41234) are NOT held: `sudo ss -tlnp '( sport = :41234 )'` after running
+`rerun --port 41234` shows `users:(("rerun",pid=…))`.
+
+**Root cause** — VS Code extension hosts running on the laptop
+(`urdf-visualizer`, `rde-ros-2`, or any webview that has ever interacted
+with a Rerun viewer) cache TCP ports they've previously seen Rerun bind, and
+re-bind those ports on `127.0.0.1` on subsequent VS Code launches. With
+`network_mode: host`, the container shares the host's port namespace, so
+those binds collide with our viewer subprocess. When `rr.spawn(port=9876)`
+sees the port taken, it falsely concludes a viewer is already there and
+silently routes data into a black hole — no window, no error.
+
+This is **not** the standard `remote.autoForwardPorts` Dev Containers
+behavior — those forwards would show up in the VS Code Ports panel; these
+do not. It's an extension binding the port directly for its own use.
+
+**Fix is built into [scripts/r1pro_test/run_rerun_bridge.py](run_rerun_bridge.py).** The wrapper now:
+
+1. Picks a fresh ephemeral port at runtime via
+   `socket.bind(("127.0.0.1", 0))` — never one VS Code has cached.
+2. Launches the `rerun` CLI binary itself (`subprocess.Popen`) on that port,
+   inheriting `DISPLAY` / `WAYLAND_DISPLAY` / `XAUTHORITY` for X11/XWayland.
+3. Polls the port until the viewer is accepting connections.
+4. Calls `rr.connect_grpc(f"rerun+http://127.0.0.1:{port}/proxy")` to attach
+   the bridge's recording stream to the launched viewer.
+5. On Ctrl-C, terminates the viewer subprocess so no zombie holds the port.
+
+Single command, no flags, no port hygiene:
+
+```bash
+python scripts/r1pro_test/run_rerun_bridge.py
 ```
 
-Native mode also spawned a viewer that died immediately. Both failures shared
-the same cause even though they live on different code paths (the fact that
-**web** failed first ruled out X11 — web mode never touches the display).
+Native window opens via X11/XWayland within ~2 seconds, all R1 Pro sensor
+streams populate per the `r1pro_rerun_blueprint` layout. Each subsequent
+launch picks a different ephemeral port, so the VS Code cache never matches.
 
-**Root cause** — `ss -tlnp` on the laptop host showed ports 9876 (rerun gRPC)
-and 9090 (rerun web) both held by `code` (PID 1966753), i.e. the **VS Code
-Rerun extension** (or a stale port-forward VS Code kept alive from an earlier
-container attach). Because the compose file uses `network_mode: host`, the
-container shares the host's port namespace — so anything the laptop's VS Code
-holds is unreachable to the container. Killing VS Code to free the ports was
-not acceptable.
-
-**Fix** — moved the bridge off the default ports. Rewrote
-`scripts/r1pro_test/run_rerun_bridge.py` to:
-
-- default to gRPC port **19876** and web port **19090** (flags `--grpc-port`
-  / `--web-port` for override),
-- set `viewer_mode="none"` on the RerunBridgeModule (so the bridge does
-  `rr.init` + LCM subscriptions + blueprint only, and skips its hardcoded
-  9876/9090 viewer setup),
-- then call `rr.serve_grpc(grpc_port=...)` + `rr.serve_web_viewer(web_port=...)`
-  manually for the web path, or `rr.spawn(port=...)` for the native path,
-- also added a `--mode connect` option defaulting to
-  `rerun+http://127.0.0.1:9876/proxy` — this pushes data to the VS Code Rerun
-  panel instead of fighting it for a port.
-
-Open the web viewer at `http://localhost:19090` instead of `:9090`.
-
-**Secondary bug caught in the rewrite** — the first version of the native path
-did `rr.serve_grpc(grpc_port=19876)` *and then* `rr.spawn(port=19876)`. The
-first call bound 19876 in the Python process; the spawned viewer then failed
-to bind the same port. Removed the `serve_grpc` call — `rr.spawn()` both
-launches the viewer and connects the SDK to it, no extra sink needed.
+**Escape hatches preserved:**
+- `--mode web` — runs `rr.serve_grpc()` + `rr.serve_web_viewer()` and
+  prints the browser URL (default `http://localhost:9090`, override with
+  `--web-port`). Useful when X11 forwarding isn't available.
+- `--mode connect --connect-url URL` — bridge connects to a viewer the user
+  launched themselves. Useful for remote viewers or for debugging the
+  connection layer.
 
 ### 9. Manipulation blueprint blocked on missing deps (Drake + trimesh)
 
@@ -684,12 +750,16 @@ wrist cameras and the head camera rendered, but the Rerun entity tree had no
 `world/r1pro/chassis/lidar`, `chassis_front_left/right`, `chassis_left/right`,
 `chassis_rear`, or `head_depth` entries.
 
-**Classification** — not a new bug. This is the known sensor-dropout
-signature already documented in `scripts/r1pro_test/SENSOR_DROP_RUNBOOK.md`
-and the "Session Log" section below: IMU and wrist streams (smaller packets,
-separate DDS participants) stay alive; large fragmented UDP payloads
+**Classification** — same signature as the sensor-dropout problem now
+resolved in the "Session Log" section below: IMU and wrist streams (smaller
+packets, separate DDS participants) stay alive; large fragmented UDP payloads
 (PointCloud2 lidar + chassis camera JPEGs) silently stop flowing into the
 chassis adapter after ~5-30 s.
+
+**Resolution** — Linux IP fragment reassembly buffer
+(`net.ipv4.ipfrag_high_thresh`) defaults to 4 MB and overflows under
+concurrent camera + lidar load. Bump it on the host to 64 MB; see Session
+Log below for the full fix.
 
 Diagnostic path when this recurs:
 
@@ -768,7 +838,7 @@ problem" below.
 - [x] Sensor stream integration (wrist cameras, chassis cameras, LiDAR, IMUs)
 - [x] Full ControlCoordinator integration with dual-arm + chassis blueprint
 - [x] Whole-body adapter
-- [ ] Sensor dropout under coordinator load — root cause still open (see below)
+- [x] Sensor dropout under coordinator load — kernel IP fragment reassembly buffer too small (resolved 2026-05-08, see below)
 - [ ] Torso control adapter (4-DOF, deferred)
 
 ---
@@ -832,7 +902,7 @@ subsystems (arms + torso + chassis + sensors) behind a single interface.
 
 ---
 
-### The sensor dropout problem (unresolved)
+### The sensor dropout problem (resolved 2026-05-08)
 
 **Symptom**: Sensor LCM topics (`/r1pro/*/wrist_color`, `/r1pro/chassis/head`,
 etc.) stop publishing as soon as the ControlCoordinator tick loop starts writing
@@ -842,29 +912,69 @@ Sometimes fails immediately on the second launch.
 **What works**: IMU (small messages, single UDP packet). **What stops**: all
 cameras and LiDAR (large messages, require UDP fragment reassembly).
 
-**Fixes tried — none resolved it**:
+**Root cause: Linux IP fragment reassembly buffer too small.**
+
+`net.ipv4.ipfrag_high_thresh` defaults to 4 MB. Six chassis cameras × ~100 KB
+JPEGs × ~30 Hz = ~18 MB/s of fragmented UDP, plus the lidar PointCloud2.
+The reassembly pool fills in <300 ms and partially-assembled datagrams evict
+each other before reassembly completes, so the kernel drops them and the
+adapter's subscription never sees them. IMUs are unaffected because each
+datagram fits in a single packet — no reassembly needed. This signature
+("small messages survive, large fragmented messages die") was correctly
+captured in the symptom but kept getting attributed to higher layers
+(rclpy, FastDDS, GIL).
+
+Smoking gun (host `nstat -az | grep -iE 'Reasm|Frag'` after a few sessions):
+```
+IpReasmFails       13,951,250
+IpReasmOKs          1,360,584     ← 10× more failures than successes
+ipfrag_high_thresh    4,194,304   ← only 4 MB
+```
+
+This is a *separate* kernel ceiling from `net.core.rmem_max` (which had already
+been raised to 64 MB during Phase 3 and was not the bottleneck on its own).
+
+**Fix — apply on the laptop host** (`net.ipv4.ipfrag_*` is net-namespaced;
+`network_mode: host` means the container inherits):
+
+```bash
+sudo sysctl -w net.ipv4.ipfrag_high_thresh=67108864
+sudo sysctl -w net.ipv4.ipfrag_low_thresh=50331648
+sudo sysctl -w net.ipv4.ipfrag_time=60
+```
+
+Persist via `/etc/sysctl.d/60-r1pro-ros2.conf`:
+```
+net.core.rmem_max = 67108864
+net.core.rmem_default = 67108864
+net.ipv4.ipfrag_high_thresh = 67108864
+net.ipv4.ipfrag_low_thresh = 50331648
+net.ipv4.ipfrag_time = 60
+```
+Then `sudo sysctl --system`. Verify after restart:
+```bash
+sysctl net.ipv4.ipfrag_high_thresh net.core.rmem_max
+nstat -n; sleep 30; nstat | grep -iE 'Reasm'   # IpReasmFails delta should be ~0
+```
+
+**Diagnostic that pinned it** (in case it recurs in a different shape):
+
+```bash
+# On the host. Run twice with the load on between.
+nstat -az | grep -iE 'Reasm|FragOK|FragFail'
+```
+Look for `IpReasmFails` climbing while `IpReasmOKs` stays flat. If those are
+the two counters that move, this is the exact same problem and the same fix
+applies — possibly with a higher ceiling if more sensors are added.
+
+**Fixes attempted while chasing this** (kept for future sessions — all are
+correctness improvements but none are the *cause*):
 
 | Fix | Rationale | Result |
 |---|---|---|
-| Move `bytes(msg.data)` copy off spin thread | Reduce GIL contention on spin thread | No change |
-| Separate `rclpy.Context` for sensors | Independent DDS participant, own UDP receive threads | No change |
-| Lambda wrappers for callback signatures | Fixed `TypeError: missing argument '_topic'` that was crashing spin thread | Partial — fixed crash, sensor dropout persists |
-| `spin_once` loop with try/except | Any remaining exception survives instead of killing spin thread | Not yet confirmed on hardware |
-| Set `_sensor_stop` before `executor.shutdown()` | Clean shutdown ordering | Correctness fix, not related to dropout |
-
-**Current hypothesis**: The spin thread may still be dying due to an exception
-in `spin_once()` that originates in rclpy/FastDDS internals (not in user
-callbacks). The crash-resilient `spin_once` loop should surface this via
-`log.warning("sensor executor exception...")` lines in the logs.
-
-**How to diagnose on next run**: Watch for these log patterns after sensors stop:
-- `"sensor spin thread stopped"` → spin thread exited (look for exception above it)
-- `"sensor executor exception (continuing): ..."` → exception being swallowed, spinning continues
-- Worker log `"0 callbacks, 0 frames"` → DDS not delivering (likely spin thread died)
-- Worker log `"N callbacks, 0 frames"` → DDS alive, broadcast failing
-
-**Other candidates not yet ruled out**:
-- FastDDS UDP receive buffer overflow (OS socket buffer ~212KB default, camera
-  JPEGs ~100KB each, 8 cameras × 30 Hz = 24 MB/s — buffer fills and silently drops)
-- FastDDS participant internal state corruption after prolonged mixed-rate traffic
-- LCM transport `broadcast()` threading issue under concurrent coordinator writes
+| Move `bytes(msg.data)` copy off spin thread | Reduce GIL contention | No effect on dropout (kernel-level drop, never reaches Python) |
+| Separate `rclpy.Context` for sensors | Independent DDS participant + sockets | No effect on dropout (same kernel netns shares the ipfrag pool) |
+| Lambda wrappers for callback signatures | Fixed `TypeError: missing argument '_topic'` crashing spin thread | Real fix for an unrelated crash |
+| `spin_once` loop with try/except + `context.ok()` check | Survive transient exceptions; exit cleanly on context shutdown | Real fix for hot-loop floods at shutdown (§10) |
+| Raise `net.core.rmem_max` to 64 MB (Phase 3) | UDP socket receive buffer | Necessary but not sufficient — `rmem_max` is a different ceiling from `ipfrag_*` |
+| Add `ReentrantCallbackGroup` to sensor subs (Phase 5b) | Parallel callback dispatch | Tested — no effect (drop is below rclpy). Reverted to keep adapters simple. |
