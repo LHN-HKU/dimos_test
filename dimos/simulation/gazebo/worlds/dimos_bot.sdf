@@ -1,0 +1,186 @@
+<?xml version="1.0" ?>
+<!--
+  Self-contained Gazebo world for the DimOS native sim module.
+
+  - One ground plane, one obstacle box
+  - One differential-drive robot named `dimos_bot` carrying:
+      * gpu_lidar (publishes LaserScan on /lidar and PointCloudPacked on /lidar/points)
+      * camera     (publishes Image on /camera and CameraInfo on /camera_info)
+
+  gz-transport topics:
+    cmd_vel  in:  /model/dimos_bot/cmd_vel       gz.msgs.Twist
+    odom    out:  /model/dimos_bot/odometry      gz.msgs.Odometry
+    lidar   out:  /lidar/points                  gz.msgs.PointCloudPacked
+    camera  out:  /camera                        gz.msgs.Image
+    cam_info out: /camera_info                   gz.msgs.CameraInfo
+-->
+<sdf version="1.9">
+  <world name="dimos_bot_world">
+
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre</render_engine>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.5 0.5 0.5 1</specular>
+      <attenuation>
+        <range>1000</range><constant>0.9</constant>
+        <linear>0.01</linear><quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.8 0.8 0.8 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obstacle">
+      <static>true</static>
+      <pose>3 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.5 0.5 1.0</size></box></geometry></collision>
+        <visual    name="v"><geometry><box><size>0.5 0.5 1.0</size></box></geometry>
+          <material><ambient>0.8 0.2 0.2 1</ambient><diffuse>0.8 0.2 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="dimos_bot">
+      <pose>0 0 0.2 0 0 0</pose>
+
+      <link name="chassis">
+        <pose>0 0 0.0 0 0 0</pose>
+        <inertial>
+          <mass>2.0</mass>
+          <inertia><ixx>0.05</ixx><iyy>0.05</iyy><izz>0.05</izz>
+                   <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="c"><geometry><box><size>0.4 0.3 0.2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.4 0.3 0.2</size></box></geometry>
+          <material><ambient>0.2 0.2 0.8 1</ambient><diffuse>0.2 0.2 0.8 1</diffuse></material>
+        </visual>
+
+        <sensor name="gpu_lidar" type="gpu_lidar">
+          <pose>0.15 0 0.15 0 0 0</pose>
+          <topic>lidar</topic>
+          <update_rate>10</update_rate>
+          <always_on>1</always_on>
+          <visualize>false</visualize>
+          <lidar>
+            <scan>
+              <horizontal>
+                <samples>360</samples><resolution>1</resolution>
+                <min_angle>-3.141592</min_angle><max_angle>3.141592</max_angle>
+              </horizontal>
+              <vertical>
+                <samples>1</samples><resolution>1</resolution>
+                <min_angle>0</min_angle><max_angle>0</max_angle>
+              </vertical>
+            </scan>
+            <range><min>0.08</min><max>20.0</max><resolution>0.01</resolution></range>
+          </lidar>
+        </sensor>
+
+        <sensor name="camera" type="camera">
+          <pose>0.2 0 0.15 0 0 0</pose>
+          <topic>camera</topic>
+          <update_rate>10</update_rate>
+          <always_on>1</always_on>
+          <visualize>false</visualize>
+          <camera>
+            <horizontal_fov>1.047</horizontal_fov>
+            <image><width>320</width><height>240</height><format>R8G8B8</format></image>
+            <clip><near>0.1</near><far>100</far></clip>
+            <camera_info_topic>camera_info</camera_info_topic>
+          </camera>
+        </sensor>
+      </link>
+
+      <link name="left_wheel">
+        <pose>0 0.18 -0.05 -1.5707 0 0</pose>
+        <inertial>
+          <mass>0.2</mass>
+          <inertia><ixx>0.001</ixx><iyy>0.001</iyy><izz>0.001</izz>
+                   <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="c"><geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="v"><geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+          <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <link name="right_wheel">
+        <pose>0 -0.18 -0.05 -1.5707 0 0</pose>
+        <inertial>
+          <mass>0.2</mass>
+          <inertia><ixx>0.001</ixx><iyy>0.001</iyy><izz>0.001</izz>
+                   <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="c"><geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="v"><geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+          <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <link name="caster">
+        <pose>-0.15 0 -0.1 0 0 0</pose>
+        <inertial><mass>0.05</mass>
+          <inertia><ixx>1e-4</ixx><iyy>1e-4</iyy><izz>1e-4</izz>
+                   <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="c"><geometry><sphere><radius>0.05</radius></sphere></geometry>
+          <surface><friction><ode><mu>0.0</mu><mu2>0.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="v"><geometry><sphere><radius>0.05</radius></sphere></geometry></visual>
+      </link>
+
+      <joint name="left_wheel_joint" type="revolute">
+        <parent>chassis</parent><child>left_wheel</child>
+        <axis><xyz>0 0 1</xyz></axis>
+      </joint>
+      <joint name="right_wheel_joint" type="revolute">
+        <parent>chassis</parent><child>right_wheel</child>
+        <axis><xyz>0 0 1</xyz></axis>
+      </joint>
+      <joint name="caster_joint" type="ball">
+        <parent>chassis</parent><child>caster</child>
+      </joint>
+
+      <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+        <left_joint>left_wheel_joint</left_joint>
+        <right_joint>right_wheel_joint</right_joint>
+        <wheel_separation>0.36</wheel_separation>
+        <wheel_radius>0.1</wheel_radius>
+        <odom_publish_frequency>50</odom_publish_frequency>
+        <!-- Defaults: subscribes /model/dimos_bot/cmd_vel,
+                       publishes  /model/dimos_bot/odometry -->
+        <frame_id>odom</frame_id>
+        <child_frame_id>base_link</child_frame_id>
+      </plugin>
+    </model>
+  </world>
+</sdf>
