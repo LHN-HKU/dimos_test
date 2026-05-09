@@ -25,15 +25,19 @@ world coordinates throughout (no per-skill frame conversions).
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import Any, Literal
 
+import numpy as np
 from reactivex.disposable import Disposable
 
 from dimos.agents.annotation import skill
 from dimos.core.core import rpc
 from dimos.core.stream import In
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
+from dimos.manipulation.pointing import solve_pointing
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.trajectory_msgs.JointTrajectory import JointTrajectory
+from dimos.msgs.trajectory_msgs.TrajectoryPoint import TrajectoryPoint
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -150,6 +154,101 @@ class G1ManipulationModule(PickAndPlaceModule):
         except Exception as e:
             logger.warning(f"Failed to load sim model: {e}")
             return False
+
+    @skill
+    def point_at(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        robot_name: str | None = None,
+    ) -> str:
+        """Aim the closer arm so the fingertip points at a world point.
+
+        Closed-form heuristic — picks left or right arm based on which
+        side of the body the target is on, then solves shoulder pitch/
+        roll directly. Far faster and more predictable than IK; sub-ms
+        compute, deterministic poses, no random restarts.
+
+        For 6-DOF EE pose tracking (grasping etc.), use ``move_to_pose``.
+
+        Args:
+            x: Target X position in meters (world frame).
+            y: Target Y position in meters (world frame).
+            z: Target Z position in meters (world frame).
+            robot_name: Force a specific arm. Default is auto-select.
+        """
+        with self._odom_lock:
+            pelvis = self._latest_odom
+        if pelvis is None:
+            return "Error: no /odom yet — robot pose unknown"
+
+        target = np.array([x, y, z], dtype=np.float64)
+        side: Literal["left", "right", "auto"] = "auto"
+        if robot_name == "left_arm":
+            side = "left"
+        elif robot_name == "right_arm":
+            side = "right"
+
+        sol = solve_pointing(target, pelvis, side=side)
+        if sol is None:
+            return (
+                f"Error: ({x:.2f}, {y:.2f}, {z:.2f}) is outside the arm's "
+                f"pointing workspace (behind torso, or too far above the shoulder)."
+            )
+
+        chosen_robot = "left_arm" if sol.side == "left" else "right_arm"
+        if chosen_robot not in self._robots:
+            return f"Error: '{chosen_robot}' not registered"
+        robot_id, config, _ = self._robots[chosen_robot]
+
+        # Read current arm joints in URDF order via the planning world.
+        if self._world_monitor is None:
+            return "Error: planning world not initialized"
+        world = self._world_monitor.world
+        with world.scratch_context() as ctx:
+            seed = world.get_joint_state(ctx, robot_id)
+        q_start = np.array(seed.position, dtype=np.float64)
+        q_target = np.array([sol.joints[name] for name in config.joint_names], dtype=np.float64)
+
+        traj = self._build_arm_trajectory(config.joint_names, q_start, q_target)
+
+        client = self._get_coordinator_client()
+        if client is None or not config.coordinator_task_name:
+            return "Error: coordinator client unavailable"
+        translated = self._translate_trajectory_to_coordinator(traj, config)
+        accepted = client.task_invoke(
+            config.coordinator_task_name, "execute", {"trajectory": translated}
+        )
+        if not accepted:
+            return "Error: coordinator rejected pointing trajectory"
+
+        if not self._wait_for_trajectory_completion(chosen_robot, timeout=5.0):
+            return "Error: pointing trajectory timed out"
+
+        return f"Pointing {sol.side} arm at ({x:.2f}, {y:.2f}, {z:.2f})"
+
+    @staticmethod
+    def _build_arm_trajectory(
+        joint_names: list[str],
+        q_start: np.ndarray,
+        q_target: np.ndarray,
+        duration: float = 1.5,
+        n_waypoints: int = 5,
+    ) -> JointTrajectory:
+        """Cosine-smoothed JointTrajectory from q_start to q_target."""
+        points: list[TrajectoryPoint] = []
+        for i in range(n_waypoints):
+            s = i / (n_waypoints - 1)
+            alpha = 0.5 - 0.5 * float(np.cos(np.pi * s))
+            q = q_start + alpha * (q_target - q_start)
+            points.append(
+                TrajectoryPoint(
+                    positions=q.tolist(),
+                    time_from_start=s * duration,
+                )
+            )
+        return JointTrajectory(joint_names=list(joint_names), points=points)
 
     @skill
     def point_at_sim_object(
