@@ -354,7 +354,7 @@ base = [
 
 # All extras except dds and unitree-dds (which require special system setup).
 all = [
-    "dimos[agents,base,cpu,cuda,dev,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web]",
+    "dimos[agents,base,cpu,cuda,dev,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web,zenoh]",
 ]
 
 [tool.ruff]
