@@ -64,6 +64,62 @@
             '' + preFixup;
           };
 
+        # ---------- OGRE-Next 2.3 (the OGRE 2.x line) ---------------
+        # Required by gz-rendering 9's `ogre2` engine — the only path to
+        # EGL surfaceless rendering for Gazebo cameras / lidar.
+        # Built with OGRE_GLSUPPORT_USE_EGL_HEADLESS=ON so it doesn't
+        # need an X server at runtime.
+        ogre-next = pkgs.stdenv.mkDerivation {
+          pname = "ogre-next";
+          version = "2.3.3";
+          src = pkgs.fetchFromGitHub {
+            owner = "OGRECave"; repo = "ogre-next";
+            rev = "v2.3.3";
+            hash = "sha256-elSj35LwsLzj1ssDPsk9NW/KSXfiOGYmw9hQSAWdpFM=";
+          };
+          nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
+          buildInputs = [
+            pkgs.freetype pkgs.freeimage pkgs.zlib pkgs.libGL pkgs.libGLU
+            pkgs.libglvnd pkgs.xorg.libX11 pkgs.xorg.libXt pkgs.xorg.libXaw
+            pkgs.xorg.libXrandr pkgs.libxkbcommon pkgs.zziplib pkgs.rapidjson
+          ];
+          cmakeFlags = [
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+            # Install as OGRE-Next.pc / lib/OGRE-Next/, which is what
+            # gz-cmake4's FindGzOGRE2 looks for via pkg-config.
+            "-DOGRE_USE_NEW_PROJECT_NAME=TRUE"
+            "-DOGRE_BUILD_SAMPLES2=OFF"
+            "-DOGRE_BUILD_TESTS=OFF"
+            "-DOGRE_BUILD_TOOLS=OFF"
+            # The piece that matters for headless rendering:
+            "-DOGRE_GLSUPPORT_USE_EGL_HEADLESS=ON"
+            # Components gz-rendering 9's ogre2 engine asks for
+            "-DOGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS=ON"
+            "-DOGRE_BUILD_COMPONENT_OVERLAY=ON"
+            "-DOGRE_BUILD_PLUGIN_PFX=OFF"
+            # Skip the Vulkan render system to avoid pulling in Vulkan SDK
+            "-DOGRE_BUILD_RENDERSYSTEM_VULKAN=OFF"
+            "-DOGRE_BUILD_RENDERSYSTEM_D3D9=OFF"
+            "-DOGRE_BUILD_RENDERSYSTEM_D3D11=OFF"
+            "-DOGRE_BUILD_RENDERSYSTEM_GL=OFF"   # OGRE-Next ships GL3Plus only
+            "-DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=ON"
+            "-DOGRE_BUILD_RENDERSYSTEM_METAL=OFF"
+            "-DOGRE_BUILD_RENDERSYSTEM_GLES2=OFF"
+            "-DOGRE_BUILD_RENDERSYSTEM_NULL=OFF"
+          ];
+          # Strip /build/ rpath refs (same issue as the gz packages)
+          preFixup = ''
+            find $out -type f \( -name '*.so' -o -name '*.so.*' \) -print0 \
+              | while IFS= read -r -d "" f; do
+                  rp=$(patchelf --print-rpath "$f" 2>/dev/null || true)
+                  if [ -n "$rp" ] && echo "$rp" | grep -q '/build/'; then
+                    new_rp=$(echo "$rp" | tr ':' '\n' | grep -v '/build/' | paste -sd: -)
+                    patchelf --set-rpath "$new_rp" "$f"
+                  fi
+                done
+          '';
+        };
+
         # Transitive deps that gz cmake configs require at configure time
         transitiveDeps = [
           pkgs.protobuf pkgs.python3 pkgs.tinyxml-2 pkgs.zeromq
@@ -284,13 +340,17 @@
           nativeBuildInputs = [ pkgs.python3 ];
           buildInputs = [
             gz-cmake gz-utils gz-math gz-common gz-plugin
-            ogre pkgs.freeimage pkgs.xorg.libX11
+            ogre ogre-next
+            pkgs.freeimage pkgs.xorg.libX11
             pkgs.libglvnd pkgs.mesa pkgs.eigen
             pkgs.libuuid pkgs.gdal pkgs.libGL pkgs.libGLU
             pkgs.assimp pkgs.boost
           ] ++ transitiveDeps;
           cmakeFlags = [
-            "-DCMAKE_PREFIX_PATH=${gz-cmake};${gz-utils};${gz-math};${gz-common};${gz-plugin}"
+            "-DCMAKE_PREFIX_PATH=${gz-cmake};${gz-utils};${gz-math};${gz-common};${gz-plugin};${ogre-next}"
+            # Point gz-cmake's GzOGRE2 finder at our OGRE-Next install
+            "-DOGRE2_HOME=${ogre-next}"
+            "-DOGRE2_DIR=${ogre-next}/lib/cmake"
           ];
           # Same patches as before:
           # (1) inject <GL/gl.h>+<GL/glext.h> before <GL/glx.h>
@@ -412,7 +472,13 @@
               --prefix GZ_GUI_PLUGIN_PATH           : ${gz-gui}/lib/gz-gui-9/plugins \
               --prefix GZ_RENDERING_PLUGIN_PATH     : ${gz-rendering}/lib/gz-rendering-9/engine-plugins \
               --prefix GZ_RENDERING_RESOURCE_PATH   : ${gz-rendering}/share/gz/gz-rendering9 \
-              --set    GZ_CONFIG_PATH                 ${gz-cmake}/share/gz
+              --set    GZ_CONFIG_PATH                 ${gz-cmake}/share/gz \
+              --prefix __EGL_VENDOR_LIBRARY_DIRS    : ${pkgs.mesa.drivers}/share/glvnd/egl_vendor.d \
+              --prefix LIBGL_DRIVERS_PATH           : ${pkgs.mesa.drivers}/lib/dri \
+              --prefix LD_LIBRARY_PATH              : ${pkgs.mesa.drivers}/lib \
+              --set-default EGL_PLATFORM             surfaceless \
+              --set-default LIBGL_ALWAYS_SOFTWARE    1 \
+              --set-default GALLIUM_DRIVER           llvmpipe
           '';
         };
 
@@ -424,6 +490,7 @@
             gz-common gz-plugin gz-msgs gz-transport
             gz-fuel-tools gz-rendering gz-gui
             gz-physics gz-sensors gz-sim
+            ogre-next
             gazebo_native;
         };
 
