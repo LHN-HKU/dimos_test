@@ -71,7 +71,7 @@ dimos --rerun-web --rerun-open native run unitree-go2
 
 To enable visualization in your own blueprint, use `vis_module`:
 
-```python
+```python skip
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.hardware.sensors.camera.module import CameraModule
 from dimos.visualization.vis_module import vis_module
