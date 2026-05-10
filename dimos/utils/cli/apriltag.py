@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Printable AprilTag PDF generator with calibration ruler.
+"""Printable AprilTag/ArUco PDF generator with calibration ruler.
 
 Draws tag cells as vector rects (no rasterization) so the PDF prints crisply at any
 DPI. The tag's outer black border edge measures `size_mm` — that's the value to pass
@@ -24,14 +24,36 @@ from __future__ import annotations
 from pathlib import Path
 
 import cv2
-from reportlab.lib.pagesizes import A0, A1, A2, A3, A4, A5, A6, A7, A8
+from reportlab.lib.pagesizes import A0, A1, A2, A3, A4, A5, A6, A7, A8, LETTER
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
+# (DICT_ID, max_id, sidePixels) — sidePixels = markerSize + 2*borderBits.
+# AprilTag dicts use a 2-cell border; ArUco dicts use a 1-cell border.
 _FAMILIES = {
+    # AprilTag (2-cell black border)
     "tag36h11": (cv2.aruco.DICT_APRILTAG_36h11, 586, 8),
     "tag25h9": (cv2.aruco.DICT_APRILTAG_25h9, 34, 7),
     "tag16h5": (cv2.aruco.DICT_APRILTAG_16h5, 29, 6),
+    # ArUco (1-cell black border)
+    "aruco_original": (cv2.aruco.DICT_ARUCO_ORIGINAL, 1023, 7),
+    "aruco_mip_36h12": (cv2.aruco.DICT_ARUCO_MIP_36h12, 249, 8),
+    "aruco_4x4_50": (cv2.aruco.DICT_4X4_50, 49, 6),
+    "aruco_4x4_100": (cv2.aruco.DICT_4X4_100, 99, 6),
+    "aruco_4x4_250": (cv2.aruco.DICT_4X4_250, 249, 6),
+    "aruco_4x4_1000": (cv2.aruco.DICT_4X4_1000, 999, 6),
+    "aruco_5x5_50": (cv2.aruco.DICT_5X5_50, 49, 7),
+    "aruco_5x5_100": (cv2.aruco.DICT_5X5_100, 99, 7),
+    "aruco_5x5_250": (cv2.aruco.DICT_5X5_250, 249, 7),
+    "aruco_5x5_1000": (cv2.aruco.DICT_5X5_1000, 999, 7),
+    "aruco_6x6_50": (cv2.aruco.DICT_6X6_50, 49, 8),
+    "aruco_6x6_100": (cv2.aruco.DICT_6X6_100, 99, 8),
+    "aruco_6x6_250": (cv2.aruco.DICT_6X6_250, 249, 8),
+    "aruco_6x6_1000": (cv2.aruco.DICT_6X6_1000, 999, 8),
+    "aruco_7x7_50": (cv2.aruco.DICT_7X7_50, 49, 9),
+    "aruco_7x7_100": (cv2.aruco.DICT_7X7_100, 99, 9),
+    "aruco_7x7_250": (cv2.aruco.DICT_7X7_250, 249, 9),
+    "aruco_7x7_1000": (cv2.aruco.DICT_7X7_1000, 999, 9),
 }
 
 _PAGE_SIZES = {
@@ -44,6 +66,7 @@ _PAGE_SIZES = {
     "a6": A6,
     "a7": A7,
     "a8": A8,
+    "letter": LETTER,
 }
 
 

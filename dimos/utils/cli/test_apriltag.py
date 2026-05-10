@@ -100,3 +100,26 @@ def test_generate_pdf_pack_accepts_sizes_single_rejects(tmp_path: Path) -> None:
     # Tall tag that fits pack mode (only ~36mm chrome) but not single mode (~100mm chrome).
     generate_pdf([0, 1], out, size_mm=200.0, page_size="a3", pack=True)
     assert out.exists()
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        "aruco_original",
+        "aruco_mip_36h12",
+        "aruco_4x4_50",
+        "aruco_5x5_100",
+        "aruco_6x6_250",
+        "aruco_7x7_1000",
+    ],
+)
+def test_generate_pdf_aruco_families(tmp_path: Path, family: str) -> None:
+    out = tmp_path / f"{family}.pdf"
+    generate_pdf([0, 1, 2], out, family=family, size_mm=50.0, page_size="a4")
+    assert out.read_bytes()[:5] == b"%PDF-"
+
+
+def test_generate_pdf_letter_page_size(tmp_path: Path) -> None:
+    out = tmp_path / "letter.pdf"
+    generate_pdf([0, 1, 2], out, size_mm=50.0, page_size="letter")
+    assert out.read_bytes()[:5] == b"%PDF-"
