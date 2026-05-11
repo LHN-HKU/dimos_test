@@ -19,14 +19,16 @@ from unittest.mock import MagicMock
 import cv2
 import numpy as np
 import pytest
+from typer.testing import CliRunner
 
 from dimos.perception.common.utils import load_camera_info, load_camera_info_opencv
+from dimos.utils.cli.cameracalibrate import cameracalibrate as cc
 from dimos.utils.cli.cameracalibrate.cameracalibrate import (
+    app,
     calibrate_from_frames,
     capture_frames_from_webcam,
     find_chessboard_corners,
     load_frames_from_folder,
-    main,
     write_camera_info_yaml,
 )
 
@@ -59,8 +61,78 @@ def _synthetic_chessboard_gray(
     return img
 
 
-def test_main_stub_runs() -> None:
-    main()
+def test_cli_help_lists_cameracalibrate_flags() -> None:
+    result = CliRunner().invoke(app, ["--help"])
+    assert result.exit_code == 0
+    for flag in [
+        "--source",
+        "--device-index",
+        "--images",
+        "--cols",
+        "--rows",
+        "--square-size-m",
+        "--out",
+        "--frame-id",
+        "--camera-name",
+        "--target-count",
+        "--no-display",
+    ]:
+        assert flag in result.output
+
+
+def test_cli_folder_writes_yaml_and_prints_rms(tmp_path, monkeypatch) -> None:
+    frames = [np.zeros((24, 32, 3), dtype=np.uint8)]
+
+    def _fake_calibrate_from_frames(
+        input_frames: list[np.ndarray],
+        cols: int,
+        rows: int,
+        square_size_m: float,
+    ) -> dict[str, object]:
+        assert input_frames == frames
+        assert (cols, rows, square_size_m) == (9, 6, 0.025)
+        return {
+            "K": np.array([[500.0, 0.0, 16.0], [0.0, 501.0, 12.0], [0.0, 0.0, 1.0]]),
+            "D": np.zeros(5),
+            "rms": 0.123456,
+            "image_size": (32, 24),
+            "n_used": 1,
+        }
+
+    monkeypatch.setattr(cc, "load_frames_from_folder", lambda _path: frames)
+    monkeypatch.setattr(cc, "calibrate_from_frames", _fake_calibrate_from_frames)
+
+    out = tmp_path / "camera_info.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "--source",
+            "folder",
+            "--images",
+            str(tmp_path),
+            "--cols",
+            "9",
+            "--rows",
+            "6",
+            "--square-size-m",
+            "0.025",
+            "--out",
+            str(out),
+            "--frame-id",
+            "camera_optical",
+            "--camera-name",
+            "webcam",
+            "--no-display",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "RMS: 0.123456 px" in result.output
+    assert out.exists()
+    info = load_camera_info(str(out), frame_id="camera_optical")
+    assert info.width == 32
+    assert info.height == 24
+    assert info.distortion_model == "plumb_bob"
 
 
 class _MockVideoCapture:

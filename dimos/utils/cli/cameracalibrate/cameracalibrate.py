@@ -12,21 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Interactive camera calibration for dimos (ROS CameraInfo YAML output).
-
-Placeholder module for the `dimos cameracalibrate` CLI; behavior is filled in by
-later T3 subtasks.
-"""
+"""Interactive camera calibration for dimos (ROS CameraInfo YAML output)."""
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 
 import cv2
 import numpy as np
+import typer
 import yaml
 
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg"})
+
+
+class Source(str, Enum):
+    """Frame source supported by the calibration CLI."""
+
+    webcam = "webcam"
+    folder = "folder"
+
+
+app = typer.Typer(
+    help="Calibrate camera intrinsics and write ROS CameraInfo YAML.",
+    no_args_is_help=True,
+)
 
 
 def write_camera_info_yaml(
@@ -267,6 +278,99 @@ def calibrate_from_frames(
     }
 
 
-def main() -> None:
-    """CLI entry point (stub)."""
-    pass
+def run_calibration(
+    *,
+    source: Source | str,
+    device_index: int,
+    images: Path | None,
+    cols: int,
+    rows: int,
+    square_size_m: float,
+    out: Path,
+    frame_id: str,
+    camera_name: str,
+    target_count: int,
+    no_display: bool,
+) -> dict[str, object]:
+    """Run calibration from the requested frame source and write CameraInfo YAML."""
+    source_value = Source(source)
+    if cols < 1:
+        raise ValueError("cols must be >= 1")
+    if rows < 1:
+        raise ValueError("rows must be >= 1")
+    if square_size_m <= 0:
+        raise ValueError("square_size_m must be > 0")
+
+    if source_value is Source.folder:
+        if images is None:
+            raise ValueError("--images is required when --source folder")
+        frames = load_frames_from_folder(str(images))
+    else:
+        frames = capture_frames_from_webcam(
+            device_index,
+            target_count,
+            cols,
+            rows,
+            no_display=no_display,
+        )
+
+    result = calibrate_from_frames(frames, cols, rows, square_size_m)
+    image_width, image_height = result["image_size"]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_camera_info_yaml(
+        str(out),
+        image_width=int(image_width),
+        image_height=int(image_height),
+        camera_name=camera_name,
+        frame_id=frame_id,
+        K=np.asarray(result["K"], dtype=np.float64),
+        D=np.asarray(result["D"], dtype=np.float64),
+    )
+    return result
+
+
+@app.command()
+def calibrate(
+    source: Source = typer.Option(..., "--source", help="Frame source: webcam or folder"),
+    device_index: int = typer.Option(0, "--device-index", help="Webcam device index"),
+    images: Path | None = typer.Option(
+        None, "--images", help="Directory of calibration images for --source folder"
+    ),
+    cols: int = typer.Option(..., "--cols", help="Inner chessboard corner columns"),
+    rows: int = typer.Option(..., "--rows", help="Inner chessboard corner rows"),
+    square_size_m: float = typer.Option(
+        ..., "--square-size-m", help="Chessboard square size in meters"
+    ),
+    out: Path = typer.Option(..., "--out", help="Output ROS CameraInfo YAML path"),
+    frame_id: str = typer.Option("camera_optical", "--frame-id", help="Camera optical frame id"),
+    camera_name: str = typer.Option("webcam", "--camera-name", help="Camera name in YAML"),
+    target_count: int = typer.Option(20, "--target-count", help="Accepted webcam frame count"),
+    no_display: bool = typer.Option(
+        False, "--no-display", help="Disable OpenCV preview windows"
+    ),
+) -> None:
+    """Calibrate camera intrinsics and write ROS CameraInfo YAML."""
+    try:
+        result = run_calibration(
+            source=source,
+            device_index=device_index,
+            images=images,
+            cols=cols,
+            rows=rows,
+            square_size_m=square_size_m,
+            out=out,
+            frame_id=frame_id,
+            camera_name=camera_name,
+            target_count=target_count,
+            no_display=no_display,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    typer.echo(f"RMS: {float(result['rms']):.6f} px ({int(result['n_used'])} frame(s) used)")
+    typer.echo(f"Wrote camera info YAML to {out}")
+
+
+def main(args: list[str] | None = None) -> None:
+    """CLI entry point."""
+    app(args=args)

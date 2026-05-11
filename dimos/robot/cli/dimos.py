@@ -666,6 +666,50 @@ def send(
 
 
 @main.command()
+def cameracalibrate(
+    source: str = typer.Option(..., "--source", help="Frame source: webcam or folder"),
+    device_index: int = typer.Option(0, "--device-index", help="Webcam device index"),
+    images: Path | None = typer.Option(
+        None, "--images", help="Directory of calibration images for --source folder"
+    ),
+    cols: int = typer.Option(..., "--cols", help="Inner chessboard corner columns"),
+    rows: int = typer.Option(..., "--rows", help="Inner chessboard corner rows"),
+    square_size_m: float = typer.Option(
+        ..., "--square-size-m", help="Chessboard square size in meters"
+    ),
+    out: Path = typer.Option(..., "--out", help="Output ROS CameraInfo YAML path"),
+    frame_id: str = typer.Option("camera_optical", "--frame-id", help="Camera optical frame id"),
+    camera_name: str = typer.Option("webcam", "--camera-name", help="Camera name in YAML"),
+    target_count: int = typer.Option(20, "--target-count", help="Accepted webcam frame count"),
+    no_display: bool = typer.Option(
+        False, "--no-display", help="Disable OpenCV preview windows"
+    ),
+) -> None:
+    """Calibrate camera intrinsics and write ROS CameraInfo YAML."""
+    from dimos.utils.cli.cameracalibrate.cameracalibrate import run_calibration
+
+    try:
+        result = run_calibration(
+            source=source,
+            device_index=device_index,
+            images=images,
+            cols=cols,
+            rows=rows,
+            square_size_m=square_size_m,
+            out=out,
+            frame_id=frame_id,
+            camera_name=camera_name,
+            target_count=target_count,
+            no_display=no_display,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    typer.echo(f"RMS: {float(result['rms']):.6f} px ({int(result['n_used'])} frame(s) used)")
+    typer.echo(f"Wrote camera info YAML to {out}")
+
+
+@main.command()
 def apriltag(
     out: Path = typer.Option(Path("apriltags.pdf"), "--out", "-o", help="Output PDF path"),
     ids: str = typer.Option("0-11", "--ids", help="ID spec, e.g. '0-49' or '0,1,5,10-20'"),
