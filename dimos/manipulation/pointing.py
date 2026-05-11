@@ -62,6 +62,8 @@ from typing import Literal
 
 import numpy as np
 
+from dimos.msgs.geometry_msgs.Point import Point
+from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 # Shoulder origin in torso_link frame, from g1.urdf (left/right symmetric in y).
@@ -283,18 +285,31 @@ def _shoulder_yxz_to_align(d: np.ndarray) -> tuple[float, float, float]:
 
 
 def solve_pointing(
-    target: PoseStamped | np.ndarray | tuple[float, float, float],
+    target: PointStamped | PoseStamped | Point | np.ndarray | tuple[float, float, float],
     pelvis_pose: PoseStamped,
     *,
     side: Side | Literal["auto"] = "auto",
 ) -> PointingSolution | None:
     """Top-level entry: pick a side and compute joints.
 
+    Accepts any of:
+        * ``PointStamped`` / ``Point``  — direct (x, y, z) attrs
+        * ``PoseStamped``              — pulls ``.position.{x,y,z}``
+        * ``np.ndarray`` or 3-tuple    — raw world coords
+
+    Stamped types are preferred at call sites that already have one
+    (object DBs publish ``PointStamped``); raw coords stay supported
+    for ad-hoc use and tests.
+
     On auto, tries the natural side first; if it returns None (e.g.
     cross-body target), falls back to the other side.
     """
     if isinstance(target, PoseStamped):
-        target_world = np.array([target.position.x, target.position.y, target.position.z])
+        target_world = np.array(
+            [target.position.x, target.position.y, target.position.z], dtype=np.float64
+        )
+    elif isinstance(target, Point):  # covers PointStamped (subclass of Point)
+        target_world = np.array([target.x, target.y, target.z], dtype=np.float64)
     else:
         target_world = np.asarray(target, dtype=np.float64).reshape(3)
 

@@ -58,6 +58,7 @@ from typing import Any
 import lcm
 
 from dimos.core.rpc_client import RPCClient
+from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 # LCM publishes geometry_msgs/PoseStamped under "<topic>#<msg_type>".
@@ -238,13 +239,13 @@ def main() -> int:
 
             t0 = time.time()
             try:
-                result = client.point_at(
-                    x=target[0],
-                    y=target[1],
-                    z=target[2],
-                    reach=args.reach,
-                    robot_name=args.arm,
+                pt = PointStamped(
+                    x=float(target[0]),
+                    y=float(target[1]),
+                    z=float(target[2]),
+                    frame_id="map",
                 )
+                result = client.point_at(target=pt, robot_name=args.arm)
             except Exception as exc:
                 result = f"Error: {exc!r}"
             elapsed = time.time() - t0

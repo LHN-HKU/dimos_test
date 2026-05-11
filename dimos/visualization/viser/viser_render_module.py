@@ -63,6 +63,30 @@ def _label_to_color(label: str) -> tuple[int, int, int]:
     return ((h >> 16) & 0xFF, (h >> 8) & 0xFF, h & 0xFF)
 
 
+def _compose_scene_mesh_wxyz(
+    *, y_up: bool, rotation_zyx_deg: tuple[float, float, float]
+) -> tuple[float, float, float, float]:
+    """Build the viser wxyz quaternion that applies (y_up swap then zyx euler) —
+    same convention as SceneMeshAlignment, just expressed as a parent-frame
+    transform so we don't have to bake it into vertices."""
+    R = np.eye(3, dtype=np.float64)
+    if y_up:
+        R = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float64)
+    rz, ry, rx = (np.deg2rad(a) for a in rotation_zyx_deg)
+    cz, sz = np.cos(rz), np.sin(rz)
+    cy, sy = np.cos(ry), np.sin(ry)
+    cx, sx = np.cos(rx), np.sin(rx)
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dtype=np.float64)
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float64)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], dtype=np.float64)
+    R = Rz @ Ry @ Rx @ R
+    import mujoco
+
+    out = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(out, R.flatten())
+    return (float(out[0]), float(out[1]), float(out[2]), float(out[3]))
+
+
 class ViserRenderModule(Module):
     """Viser viewer that overlays the live robot on a Gaussian splat.
 
@@ -95,6 +119,14 @@ class ViserRenderModule(Module):
     # error ("arm aimed wrong even though the box is correct").
     found_objects: In[BBoxMarkers]
     clicked_point: Out[PointStamped]
+    # Interactive pointing-target publisher. Wired up by the "Set point
+    # goal" button: armed by the user pressing the button, the next
+    # scene click ray-casts against the scene mesh (if loaded) or
+    # intersects the eye-height plane, and the resulting world-frame
+    # point is published here. G1ManipulationModule subscribes and runs
+    # point_at on each value. Separate stream from clicked_point so a
+    # human's pointing click doesn't accidentally retarget the navigator.
+    point_goal: Out[PointStamped]
 
     def __init__(
         self,
@@ -130,6 +162,10 @@ class ViserRenderModule(Module):
         # viser handles for view-mode toggle
         self._splat_handle: Any = None
         self._scene_mesh_handle: Any = None
+        # Open3D RaycastingScene built from the scene-mesh geometry. Used
+        # by the "Set point goal" button to resolve a 2D click into an
+        # exact 3D surface hit. None when no scene mesh is configured.
+        self._raycast_scene: Any = None
 
         # Mutable shared state — written from In subscribers, read from
         # the render loop.  Plain dict + lock; values are lightweight.
@@ -239,76 +275,8 @@ class ViserRenderModule(Module):
         # world frame as the robot.  ``MeshCameraModule`` ray-casts the
         # same mesh to feed the head-camera RGB topic.
         if self._scene_mesh_path is not None and self._scene_mesh_path.exists():
-            from dimos.mapping.mesh_scene import (
-                SceneMeshAlignment,
-                load_scene_mesh,
-            )
-
             try:
-                mesh_alignment = SceneMeshAlignment(
-                    scale=self._scene_mesh_scale,
-                    rotation_zyx_deg=self._scene_mesh_rotation_zyx_deg,
-                    translation=self._scene_mesh_translation,
-                    y_up=self._scene_mesh_y_up,
-                )
-                logger.info(f"Viser: loading scene mesh {self._scene_mesh_path}")
-                scene_mesh = load_scene_mesh(self._scene_mesh_path, alignment=mesh_alignment)
-                vertices = np.asarray(scene_mesh.vertices, dtype=np.float32)
-                faces = np.asarray(scene_mesh.triangles, dtype=np.int32)
-                # Forward per-vertex colors when the loader extracted them
-                # (USD ``displayColor`` primvar or material ``diffuseColor``).
-                # ``add_mesh_simple`` only accepts a single color in this
-                # viser build, so for the colored path we go through
-                # ``add_mesh_trimesh`` which preserves per-vertex visual data.
-                vertex_colors_raw = (
-                    np.asarray(scene_mesh.vertex_colors) if scene_mesh.has_vertex_colors() else None
-                )
-                if vertex_colors_raw is not None and len(vertex_colors_raw) == len(vertices):
-                    import trimesh
-
-                    rgba = np.empty((len(vertices), 4), dtype=np.uint8)
-                    rgba[:, :3] = (np.clip(vertex_colors_raw, 0.0, 1.0) * 255.0).astype(np.uint8)
-                    rgba[:, 3] = 255
-                    tm = trimesh.Trimesh(
-                        vertices=vertices,
-                        faces=faces,
-                        vertex_colors=rgba,
-                        process=False,
-                    )
-                    self._scene_mesh_handle = self._server.scene.add_mesh_trimesh(
-                        "/scene_mesh", mesh=tm
-                    )
-                    color_msg = "with per-vertex colors"
-                else:
-                    self._scene_mesh_handle = self._server.scene.add_mesh_simple(
-                        "/scene_mesh",
-                        vertices=vertices,
-                        faces=faces,
-                        color=(180, 180, 180),
-                        opacity=1.0,
-                    )
-                    color_msg = "no vertex colors found, falling back to grey"
-                logger.info(
-                    f"Viser: scene mesh added "
-                    f"({len(vertices)} verts, {len(faces)} tris, {color_msg})"
-                )
-                # Frame each connecting client on the mesh's bounding box so
-                # the user lands looking at the scene rather than at viser's
-                # default camera (which sits at the origin and ends up
-                # *inside* a 6m × 12m × 3m room).
-                bbox_min = vertices.min(axis=0)
-                bbox_max = vertices.max(axis=0)
-                center = (bbox_min + bbox_max) * 0.5
-                extent = float(np.linalg.norm(bbox_max - bbox_min))
-                cam_pos = center + np.array(
-                    [extent * 0.6, -extent * 0.6, extent * 0.4],
-                    dtype=np.float32,
-                )
-
-                @self._server.on_client_connect
-                def _frame_camera_on_mesh(client: Any) -> None:
-                    client.camera.position = tuple(float(x) for x in cam_pos)
-                    client.camera.look_at = tuple(float(x) for x in center)
+                self._add_scene_mesh()
             except Exception as e:
                 logger.warning(f"Viser: scene mesh load failed: {e}")
 
@@ -473,6 +441,30 @@ class ViserRenderModule(Module):
                 nav_goal_button.disabled = False
                 nav_goal_button.label = "Set nav goal"
 
+        # Click-to-point. Same one-shot-callback pattern; the click ray
+        # is intersected with the scene-mesh raycaster if one is loaded,
+        # else with an eye-height (z=1.0 m) horizontal plane so pointing
+        # works even when no scene mesh is configured. Published on
+        # /point_goal; G1ManipulationModule subscribes and runs point_at.
+        point_goal_button = self._server.gui.add_button("Set point goal")
+
+        @point_goal_button.on_click
+        def _arm_point_goal_click(_event: Any) -> None:
+            point_goal_button.disabled = True
+            point_goal_button.label = "Click target..."
+
+            @self._server.scene.on_pointer_event(event_type="click")
+            def _on_point_click(event: Any) -> None:
+                try:
+                    self._handle_point_goal_click(event)
+                finally:
+                    self._server.scene.remove_pointer_callback()
+
+            @self._server.scene.on_pointer_callback_removed
+            def _rearm_point_button() -> None:
+                point_goal_button.disabled = False
+                point_goal_button.label = "Set point goal"
+
         try:
             unsub = self.path.subscribe(self._on_path)
             self.register_disposable(Disposable(unsub))
@@ -526,6 +518,93 @@ class ViserRenderModule(Module):
                 pass
         super().stop()
 
+    def _add_scene_mesh(self) -> None:
+        """Add the configured scene mesh to viser.
+
+        For ``.glb``/``.gltf`` we hand the file's bytes straight to
+        ``server.scene.add_glb()`` — the browser renders the PBR materials
+        natively. This is critical: going through ``load_scene_mesh()`` calls
+        ``trimesh.load(force="mesh")`` which decompresses every embedded
+        texture to sample per-vertex colors, allocating ~10 GB peak for a
+        scene with many 4K PBR textures (e.g. the office mesh has 321 textures
+        totaling ~895 MP). For unknown extensions (USD, OBJ, etc.) we fall back
+        to the geometry path — those generally don't have the embedded-texture
+        problem.
+        """
+        assert self._scene_mesh_path is not None
+        path = self._scene_mesh_path
+        suffix = path.suffix.lower()
+
+        # Alignment for viser: handed to add_glb as scale + wxyz + position so
+        # we don't touch the geometry at all on this path.
+        wxyz = _compose_scene_mesh_wxyz(
+            y_up=self._scene_mesh_y_up,
+            rotation_zyx_deg=self._scene_mesh_rotation_zyx_deg,
+        )
+        position = tuple(float(x) for x in self._scene_mesh_translation)
+        scale = float(self._scene_mesh_scale)
+
+        # Always build a server-side raycaster from the geometry so the
+        # "Set point goal" button can resolve clicks to surface hits.
+        # Cheap now that GLBs are geometry-only (textures stripped at
+        # asset-prep time) — load_scene_mesh peaks at ~1 GB even for the
+        # 1.4M-vert office mesh.
+        from dimos.mapping.mesh_scene import (
+            SceneMeshAlignment,
+            load_scene_mesh,
+            make_raycasting_scene,
+        )
+
+        mesh_alignment = SceneMeshAlignment(
+            scale=self._scene_mesh_scale,
+            rotation_zyx_deg=self._scene_mesh_rotation_zyx_deg,
+            translation=self._scene_mesh_translation,
+            y_up=self._scene_mesh_y_up,
+        )
+
+        if suffix in {".glb", ".gltf"}:
+            logger.info(f"Viser: loading scene mesh {path} (GLB native path)")
+            with open(path, "rb") as f:
+                glb_bytes = f.read()
+            self._scene_mesh_handle = self._server.scene.add_glb(
+                "/scene_mesh",
+                glb_data=glb_bytes,
+                scale=scale,
+                wxyz=wxyz,
+                position=position,
+            )
+            logger.info(f"Viser: scene mesh added ({len(glb_bytes)/1e6:.1f} MB GLB)")
+            # Build raycaster from geometry separately (browser already
+            # has the bytes for display; we need o3d structures here).
+            try:
+                scene_mesh = load_scene_mesh(path, alignment=mesh_alignment)
+                self._raycast_scene = make_raycasting_scene(scene_mesh)
+                logger.info("Viser: scene-mesh raycaster ready for click-to-point")
+            except Exception as e:
+                logger.warning(f"Viser: raycaster build failed (point-goal will use plane fallback): {e}")
+            return
+
+        # Non-GLB path: USD, OBJ, PLY — geometry-only, no texture decode blowup.
+        logger.info(f"Viser: loading scene mesh {path}")
+        scene_mesh = load_scene_mesh(path, alignment=mesh_alignment)
+        vertices = np.asarray(scene_mesh.vertices, dtype=np.float32)
+        faces = np.asarray(scene_mesh.triangles, dtype=np.int32)
+        self._scene_mesh_handle = self._server.scene.add_mesh_simple(
+            "/scene_mesh",
+            vertices=vertices,
+            faces=faces,
+            color=(180, 180, 180),
+            opacity=1.0,
+        )
+        logger.info(
+            f"Viser: scene mesh added ({len(vertices)} verts, {len(faces)} tris)"
+        )
+        try:
+            self._raycast_scene = make_raycasting_scene(scene_mesh)
+            logger.info("Viser: scene-mesh raycaster ready for click-to-point")
+        except Exception as e:
+            logger.warning(f"Viser: raycaster build failed: {e}")
+
     def _handle_floor_click(self, event: Any) -> None:
         """Project the click ray onto the z=0 floor and publish a goal."""
         ray_origin = event.ray_origin
@@ -559,6 +638,63 @@ class ViserRenderModule(Module):
         point = PointStamped(x=float(x), y=float(y), z=0.0, ts=time.time(), frame_id="map")
         self.clicked_point.publish(point)
         logger.info(f"Viser nav-goal: published clicked_point=({x:.3f}, {y:.3f})")
+
+    def _handle_point_goal_click(self, event: Any) -> None:
+        """Click → 3D world point → publish to /point_goal.
+
+        Resolution order:
+          1. Cast against the loaded scene-mesh raycaster (exact surface hit).
+          2. Fall back to intersecting an eye-height z=1.0 m plane — picking
+             a floor target makes no sense for pointing, and eye height is a
+             reasonable default for "the user clicked on empty space".
+        """
+        ray_origin = event.ray_origin
+        ray_direction = event.ray_direction
+        if ray_origin is None or ray_direction is None:
+            return
+
+        ox, oy, oz = (float(v) for v in ray_origin)
+        dx, dy, dz = (float(v) for v in ray_direction)
+
+        hit_xyz: tuple[float, float, float] | None = None
+
+        # 1. Scene-mesh ray-cast if we have one.
+        if self._raycast_scene is not None:
+            import open3d.core as o3c
+
+            rays = o3c.Tensor(
+                np.array([[ox, oy, oz, dx, dy, dz]], dtype=np.float32),
+                dtype=o3c.Dtype.Float32,
+            )
+            t_hit = float(self._raycast_scene.cast_rays(rays)["t_hit"].numpy()[0])
+            if np.isfinite(t_hit) and t_hit > 0:
+                hit_xyz = (ox + t_hit * dx, oy + t_hit * dy, oz + t_hit * dz)
+
+        # 2. Fallback: intersect z = 1.0 m plane.
+        if hit_xyz is None:
+            if abs(dz) < 1e-6:
+                logger.info("Viser point-goal: ray parallel to eye plane, ignoring")
+                return
+            t = (1.0 - oz) / dz
+            if t <= 0:
+                logger.info("Viser point-goal: target behind camera, ignoring")
+                return
+            hit_xyz = (ox + t * dx, oy + t * dy, 1.0)
+
+        x, y, z = hit_xyz
+        try:
+            self._server.scene.add_icosphere(
+                "/point_goal_marker",
+                radius=0.06,
+                position=(float(x), float(y), float(z)),
+                color=(255, 80, 200),  # magenta — distinct from nav-goal cyan
+            )
+        except Exception as e:
+            logger.debug(f"Viser point-goal marker failed: {e}")
+
+        point = PointStamped(x=float(x), y=float(y), z=float(z), ts=time.time(), frame_id="map")
+        self.point_goal.publish(point)
+        logger.info(f"Viser point-goal: published point_goal=({x:.3f}, {y:.3f}, {z:.3f})")
 
     def _on_path(self, msg: PathMsg) -> None:
         """Draw the planner's path as a polyline floating above the floor."""

@@ -35,6 +35,8 @@ from dimos.core.core import rpc
 from dimos.core.stream import In
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
 from dimos.manipulation.pointing import solve_pointing
+from dimos.msgs.geometry_msgs.Point import Point
+from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.trajectory_msgs.JointTrajectory import JointTrajectory
 from dimos.msgs.trajectory_msgs.TrajectoryPoint import TrajectoryPoint
@@ -54,6 +56,11 @@ class G1ManipulationModule(PickAndPlaceModule):
     """
 
     odom: In[PoseStamped]
+    # Interactive trigger: anything that publishes a PointStamped here
+    # (typically the Viser "Set point goal" button) drives a full
+    # reset-and-point cycle on the configured arm. Decoupled from MCP so
+    # a human can drive pointing without going through the agent loop.
+    point_goal: In[PointStamped]
 
     _latest_odom: PoseStamped | None
     _odom_lock: threading.Lock
@@ -77,6 +84,26 @@ class G1ManipulationModule(PickAndPlaceModule):
             self.register_disposable(Disposable(unsub))
         except Exception as e:
             logger.warning(f"G1ManipulationModule: odom subscribe failed: {e}")
+        try:
+            unsub = self.point_goal.subscribe(self._on_point_goal)
+            self.register_disposable(Disposable(unsub))
+        except Exception as e:
+            logger.warning(f"G1ManipulationModule: point_goal subscribe failed: {e}")
+
+    def _on_point_goal(self, msg: PointStamped) -> None:
+        """Run point_at on the configured arm when a new goal arrives.
+
+        Fired from the Viser viewer's "Set point goal" button (or any
+        other producer of /point_goal). Runs in the subscriber thread —
+        point_at is synchronous (sends two trajectories + waits) so this
+        thread blocks for ~3-4 s per click; the In-stream queue absorbs
+        rapid re-clicks. Result string is logged; no return value.
+        """
+        try:
+            result = self.point_at(target=msg)
+            logger.info(f"point_goal → {result}")
+        except Exception as e:
+            logger.warning(f"point_goal handler failed: {e}")
 
     def _on_odom(self, msg: PoseStamped) -> None:
         with self._odom_lock:
@@ -158,9 +185,7 @@ class G1ManipulationModule(PickAndPlaceModule):
     @skill
     def point_at(
         self,
-        x: float,
-        y: float,
-        z: float,
+        target: PointStamped | PoseStamped,
         robot_name: str | None = None,
     ) -> str:
         """Aim the closer arm so the fingertip points at a world point.
@@ -170,12 +195,19 @@ class G1ManipulationModule(PickAndPlaceModule):
         roll directly. Far faster and more predictable than IK; sub-ms
         compute, deterministic poses, no random restarts.
 
+        Pass any stamped geometry message that carries a world-frame
+        position — ``PointStamped`` from ``ObjectFinder3D`` / saved-object
+        DBs, or a ``PoseStamped`` whose ``.position`` is the point of
+        interest. Only the (x, y, z) is consumed; orientation is ignored
+        (pointing is a ray, not a pose).
+
         For 6-DOF EE pose tracking (grasping etc.), use ``move_to_pose``.
 
         Args:
-            x: Target X position in meters (world frame).
-            y: Target Y position in meters (world frame).
-            z: Target Z position in meters (world frame).
+            target: World-frame point/pose to aim at. ``PointStamped`` is
+                preferred (semantically a 3D point); ``PoseStamped`` is
+                accepted for callers that already have one and don't want
+                to strip orientation themselves.
             robot_name: Force a specific arm. Default is auto-select.
         """
         with self._odom_lock:
@@ -183,7 +215,15 @@ class G1ManipulationModule(PickAndPlaceModule):
         if pelvis is None:
             return "Error: no /odom yet — robot pose unknown"
 
-        target = np.array([x, y, z], dtype=np.float64)
+        # Extract (x, y, z) for the error message; solve_pointing pulls
+        # them itself from the stamped target.
+        if isinstance(target, PoseStamped):
+            tx, ty, tz = target.position.x, target.position.y, target.position.z
+        elif isinstance(target, Point):  # PointStamped is a Point subclass
+            tx, ty, tz = target.x, target.y, target.z
+        else:
+            return f"Error: target must be PointStamped or PoseStamped, got {type(target).__name__}"
+
         side: Literal["left", "right", "auto"] = "auto"
         if robot_name == "left_arm":
             side = "left"
@@ -193,40 +233,80 @@ class G1ManipulationModule(PickAndPlaceModule):
         sol = solve_pointing(target, pelvis, side=side)
         if sol is None:
             return (
-                f"Error: ({x:.2f}, {y:.2f}, {z:.2f}) is outside the arm's "
+                f"Error: ({tx:.2f}, {ty:.2f}, {tz:.2f}) is outside the arm's "
                 f"pointing workspace (behind torso, or too far above the shoulder)."
             )
 
         chosen_robot = "left_arm" if sol.side == "left" else "right_arm"
         if chosen_robot not in self._robots:
             return f"Error: '{chosen_robot}' not registered"
-        robot_id, config, _ = self._robots[chosen_robot]
+        chosen_id, chosen_config, _ = self._robots[chosen_robot]
 
-        # Read current arm joints in URDF order via the planning world.
         if self._world_monitor is None:
             return "Error: planning world not initialized"
         world = self._world_monitor.world
-        with world.scratch_context() as ctx:
-            seed = world.get_joint_state(ctx, robot_id)
-        q_start = np.array(seed.position, dtype=np.float64)
-        q_target = np.array([sol.joints[name] for name in config.joint_names], dtype=np.float64)
-
-        traj = self._build_arm_trajectory(config.joint_names, q_start, q_target)
 
         client = self._get_coordinator_client()
-        if client is None or not config.coordinator_task_name:
+        if client is None or not chosen_config.coordinator_task_name:
             return "Error: coordinator client unavailable"
-        translated = self._translate_trajectory_to_coordinator(traj, config)
-        accepted = client.task_invoke(
-            config.coordinator_task_name, "execute", {"trajectory": translated}
+
+        # --- Phase 1: hard reset *both* arms to the all-zeros baseline ---
+        # Symmetric reset (not just the pointing arm): keeps the idle arm
+        # from accumulating drift across calls, and avoids the LLM seeing
+        # the previous-pointed arm stay raised when point_at chooses the
+        # other side on the next call. Trajectories are issued back-to-back
+        # then awaited in parallel — the coordinator runs the two task
+        # streams independently so we don't pay 2×duration.
+        in_flight: list[tuple[str, np.ndarray]] = []  # (robot_name, q_zero)
+        for arm_name in ("left_arm", "right_arm"):
+            if arm_name not in self._robots:
+                continue
+            rid, cfg, _ = self._robots[arm_name]
+            with world.scratch_context() as ctx:
+                seed = world.get_joint_state(ctx, rid)
+            q_start = np.array(seed.position, dtype=np.float64)
+            q_zero = np.zeros_like(q_start)
+            # Fast-path: skip the trajectory if this arm is already at zero.
+            if float(np.max(np.abs(q_start - q_zero))) <= 1e-3:
+                continue
+            reset_traj = self._build_arm_trajectory(
+                cfg.joint_names, q_start, q_zero, duration=1.25, via_zero=False
+            )
+            reset_translated = self._translate_trajectory_to_coordinator(reset_traj, cfg)
+            if not client.task_invoke(
+                cfg.coordinator_task_name, "execute", {"trajectory": reset_translated}
+            ):
+                return f"Error: coordinator rejected reset trajectory for {arm_name}"
+            in_flight.append((arm_name, q_zero))
+
+        for arm_name, _ in in_flight:
+            if not self._wait_for_trajectory_completion(arm_name, timeout=4.0):
+                return f"Error: reset-to-zero trajectory for {arm_name} timed out"
+
+        # --- Phase 2: point at the target from the zero baseline ---
+        # After the reset, the chosen arm is at q_zero; build the
+        # pointing trajectory from that baseline directly.
+        q_zero_chosen = np.zeros(len(chosen_config.joint_names), dtype=np.float64)
+        q_target = np.array(
+            [sol.joints[name] for name in chosen_config.joint_names], dtype=np.float64
         )
-        if not accepted:
+        point_traj = self._build_arm_trajectory(
+            chosen_config.joint_names,
+            q_zero_chosen,
+            q_target,
+            duration=1.25,
+            via_zero=False,
+        )
+        point_translated = self._translate_trajectory_to_coordinator(point_traj, chosen_config)
+        if not client.task_invoke(
+            chosen_config.coordinator_task_name, "execute", {"trajectory": point_translated}
+        ):
             return "Error: coordinator rejected pointing trajectory"
 
-        if not self._wait_for_trajectory_completion(chosen_robot, timeout=8.0):
+        if not self._wait_for_trajectory_completion(chosen_robot, timeout=4.0):
             return "Error: pointing trajectory timed out"
 
-        return f"Pointing {sol.side} arm at ({x:.2f}, {y:.2f}, {z:.2f})"
+        return f"Pointing {sol.side} arm at ({tx:.2f}, {ty:.2f}, {tz:.2f})"
 
     @staticmethod
     def _build_arm_trajectory(
@@ -305,7 +385,8 @@ class G1ManipulationModule(PickAndPlaceModule):
         pos = self._sim_data.xpos[body_id]
         x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
         logger.info(f"point_at_sim_object('{body_name}') → world ({x:.3f}, {y:.3f}, {z:.3f})")
-        return self.point_at(x=x, y=y, z=z, robot_name=robot_name)
+        target = PointStamped(x=x, y=y, z=z, frame_id="map")
+        return self.point_at(target=target, robot_name=robot_name)
 
     @skill
     def reach_for_sim_object(

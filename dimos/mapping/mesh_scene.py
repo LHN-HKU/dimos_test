@@ -302,31 +302,48 @@ def load_scene_mesh(
     if suffix in {".usdz", ".usd", ".usdc", ".usda"}:
         mesh = _load_usd_mesh(path)
     elif suffix in {".glb", ".gltf"}:
-        # o3d.io can read glTF geometry but drops textures/UVs and
-        # silently re-indexes vertices, so the viser viewer (which only
-        # renders per-vertex colors) shows the mesh as flat grey.  Use
-        # trimesh instead — its PBRMaterial loader plus
-        # ``visual.to_color()`` samples the diffuse texture at each
-        # vertex's UV and gives back a Trimesh with vertex_colors, which
-        # we copy onto the o3d mesh so the rest of the pipeline (bake +
-        # raycast) sees a consistent representation.
+        # GEOMETRY-ONLY GLB load. Used by floor-z probing and ``MeshCameraModule``
+        # ray-casting — neither needs PBR materials. The Viser viewer takes the
+        # GLB-native path (``add_glb`` from raw bytes) so it doesn't go through
+        # here. ``trimesh.load(path, force="mesh")`` would flatten the scene by
+        # decompressing every embedded texture and sampling per-vertex colors —
+        # for a scene with hundreds of 4K PBR textures (~895 MP total in dimos's
+        # office mesh) that allocates ~10 GB transiently and OOMs 32 GB boxes.
+        # We open in Scene mode (no flattening, no texture decode), walk the
+        # instance graph applying each instance's world transform, and emit a
+        # single concatenated mesh — peak stays under ~1 GB.
         import trimesh
 
-        tm = trimesh.load(str(path), force="mesh")
-        if len(tm.faces) == 0:
-            raise RuntimeError(f"trimesh.load returned an empty mesh for {path}")
-        # ``to_color`` only exists on ``TextureVisuals`` — when ``force="mesh"``
-        # merges across multiple PBR materials trimesh hands back ``ColorVisuals``
-        # (already in color form) which has no ``to_color`` method.
-        visual = tm.visual
-        color_visual = visual.to_color() if hasattr(visual, "to_color") else visual
-        vc = getattr(color_visual, "vertex_colors", None)
+        scene_or_mesh = trimesh.load(str(path))
+        if isinstance(scene_or_mesh, trimesh.Trimesh):
+            verts_world = np.asarray(scene_or_mesh.vertices, dtype=np.float64)
+            faces_world = np.asarray(scene_or_mesh.faces, dtype=np.int64)
+        else:
+            scene = scene_or_mesh
+            verts_chunks: list[np.ndarray] = []
+            faces_chunks: list[np.ndarray] = []
+            v_off = 0
+            for node_name in scene.graph.nodes_geometry:
+                xform, geom_name = scene.graph[node_name]
+                geom = scene.geometry.get(geom_name)
+                if geom is None or not isinstance(geom, trimesh.Trimesh) or len(geom.faces) == 0:
+                    continue
+                v_local = np.asarray(geom.vertices, dtype=np.float64)
+                f_local = np.asarray(geom.faces, dtype=np.int64)
+                m = np.asarray(xform, dtype=np.float64)
+                v_h = np.hstack([v_local, np.ones((len(v_local), 1), dtype=np.float64)])
+                v_world = (m @ v_h.T).T[:, :3]
+                verts_chunks.append(v_world)
+                faces_chunks.append(f_local + v_off)
+                v_off += len(v_local)
+            if not verts_chunks:
+                raise RuntimeError(f"glTF loaded but no Trimesh instances found: {path}")
+            verts_world = np.concatenate(verts_chunks, axis=0)
+            faces_world = np.concatenate(faces_chunks, axis=0)
+
         mesh = o3d.geometry.TriangleMesh()
-        mesh.vertices = o3d.utility.Vector3dVector(np.asarray(tm.vertices, dtype=np.float64))
-        mesh.triangles = o3d.utility.Vector3iVector(np.asarray(tm.faces, dtype=np.int32))
-        if vc is not None and len(vc) == len(tm.vertices):
-            rgb = np.asarray(vc, dtype=np.float64)[:, :3] / 255.0
-            mesh.vertex_colors = o3d.utility.Vector3dVector(rgb)
+        mesh.vertices = o3d.utility.Vector3dVector(verts_world)
+        mesh.triangles = o3d.utility.Vector3iVector(faces_world.astype(np.int32))
     else:
         mesh = o3d.io.read_triangle_mesh(str(path))
         if len(mesh.triangles) == 0:
