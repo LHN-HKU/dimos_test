@@ -38,8 +38,13 @@ from dimos.control.components import (
     HardwareType,
     JointName,
     TaskName,
+    split_joint_name,
 )
-from dimos.control.hardware_interface import ConnectedHardware, ConnectedTwistBase
+from dimos.control.hardware_interface import (
+    ConnectedHardware,
+    ConnectedTwistBase,
+    ConnectedWholeBody,
+)
 from dimos.control.task import ControlTask
 from dimos.control.tick_loop import TickLoop
 from dimos.core.core import rpc
@@ -49,13 +54,10 @@ from dimos.hardware.drive_trains.spec import (
     TwistBaseAdapter,
 )
 from dimos.hardware.manipulators.spec import ManipulatorAdapter
-from dimos.msgs.geometry_msgs import (
-    PoseStamped,
-    Twist,
-)
-from dimos.msgs.sensor_msgs import (
-    JointState,
-)
+from dimos.hardware.whole_body.spec import WholeBodyAdapter
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.teleop.quest.quest_types import (
     Buttons,
 )
@@ -64,13 +66,7 @@ from dimos.utils.logging_config import setup_logger
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-
 logger = setup_logger()
-
-
-# =============================================================================
-# Configuration
-# =============================================================================
 
 
 @dataclass
@@ -104,7 +100,6 @@ class TaskConfig:
     gripper_closed_pos: float = 0.0
 
 
-@dataclass
 class ControlCoordinatorConfig(ModuleConfig):
     """Configuration for the ControlCoordinator.
 
@@ -125,12 +120,7 @@ class ControlCoordinatorConfig(ModuleConfig):
     tasks: list[TaskConfig] = field(default_factory=lambda: [])
 
 
-# =============================================================================
-# ControlCoordinator Module
-# =============================================================================
-
-
-class ControlCoordinator(Module[ControlCoordinatorConfig]):
+class ControlCoordinator(Module):
     """Centralized control coordinator with per-joint arbitration.
 
     Single tick loop that:
@@ -158,6 +148,8 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
         >>> orch.start()
     """
 
+    config: ControlCoordinatorConfig
+
     # Output: Aggregated joint state for external consumers
     joint_state: Out[JointState]
 
@@ -173,9 +165,6 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
 
     # Input: Teleop buttons for engage/disengage signaling
     buttons: In[Buttons]
-
-    config: ControlCoordinatorConfig
-    default_config = ControlCoordinatorConfig
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -202,10 +191,6 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
 
         logger.info(f"ControlCoordinator initialized at {self.config.tick_rate}Hz")
 
-    # =========================================================================
-    # Config-based Setup
-    # =========================================================================
-
     def _setup_from_config(self) -> None:
         """Create hardware and tasks from config (called on start)."""
         hardware_added: list[str] = []
@@ -230,8 +215,10 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
 
     def _setup_hardware(self, component: HardwareComponent) -> None:
         """Connect and add a single hardware adapter."""
-        adapter: ManipulatorAdapter | TwistBaseAdapter
-        if component.hardware_type == HardwareType.BASE:
+        adapter: ManipulatorAdapter | TwistBaseAdapter | WholeBodyAdapter
+        if component.hardware_type == HardwareType.WHOLE_BODY:
+            adapter = self._create_whole_body_adapter(component)
+        elif component.hardware_type == HardwareType.BASE:
             adapter = self._create_twist_base_adapter(component)
         else:
             adapter = self._create_adapter(component)
@@ -256,6 +243,8 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
             component.adapter_type,
             dof=len(component.joints),
             address=component.address,
+            hardware_id=component.hardware_id,
+            **component.adapter_kwargs,
         )
 
     def _create_twist_base_adapter(self, component: HardwareComponent) -> TwistBaseAdapter:
@@ -266,6 +255,32 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
             component.adapter_type,
             dof=len(component.joints),
             address=component.address,
+            hardware_id=component.hardware_id,
+            **component.adapter_kwargs,
+        )
+
+    def _create_whole_body_adapter(self, component: HardwareComponent) -> WholeBodyAdapter:
+        """Create a whole-body adapter from component config.
+
+        ``component.address`` carries the DDS network interface — int (CAN port)
+        or str ("enp60s0"); cyclonedds requires the right type, so try int() first
+        and fall back to keeping the original string.
+        """
+        from dimos.hardware.whole_body.registry import whole_body_adapter_registry
+
+        addr: int | str | None = component.address
+        if addr is not None:
+            try:
+                addr = int(addr)
+            except ValueError:
+                pass  # keep as string (e.g. "enp60s0")
+
+        return whole_body_adapter_registry.create(
+            component.adapter_type,
+            dof=len(component.joints),
+            hardware_id=component.hardware_id,
+            network_interface=addr if addr is not None else "",
+            **component.adapter_kwargs,
         )
 
     def _create_task_from_config(self, cfg: TaskConfig) -> ControlTask:
@@ -273,7 +288,10 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
         task_type = cfg.type.lower()
 
         if task_type == "trajectory":
-            from dimos.control.tasks import JointTrajectoryTask, JointTrajectoryTaskConfig
+            from dimos.control.tasks.trajectory_task import (
+                JointTrajectoryTask,
+                JointTrajectoryTaskConfig,
+            )
 
             return JointTrajectoryTask(
                 cfg.name,
@@ -284,7 +302,7 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
             )
 
         elif task_type == "servo":
-            from dimos.control.tasks import JointServoTask, JointServoTaskConfig
+            from dimos.control.tasks.servo_task import JointServoTask, JointServoTaskConfig
 
             return JointServoTask(
                 cfg.name,
@@ -295,7 +313,7 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
             )
 
         elif task_type == "velocity":
-            from dimos.control.tasks import JointVelocityTask, JointVelocityTaskConfig
+            from dimos.control.tasks.velocity_task import JointVelocityTask, JointVelocityTaskConfig
 
             return JointVelocityTask(
                 cfg.name,
@@ -306,7 +324,7 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
             )
 
         elif task_type == "cartesian_ik":
-            from dimos.control.tasks import CartesianIKTask, CartesianIKTaskConfig
+            from dimos.control.tasks.cartesian_ik_task import CartesianIKTask, CartesianIKTaskConfig
 
             if cfg.model_path is None:
                 raise ValueError(f"CartesianIKTask '{cfg.name}' requires model_path in TaskConfig")
@@ -344,20 +362,24 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
-    # =========================================================================
-    # Hardware Management (RPC)
-    # =========================================================================
-
     @rpc
     def add_hardware(
         self,
-        adapter: ManipulatorAdapter | TwistBaseAdapter,
+        adapter: ManipulatorAdapter | TwistBaseAdapter | WholeBodyAdapter,
         component: HardwareComponent,
     ) -> bool:
         """Register a hardware adapter with the coordinator."""
         is_base = component.hardware_type == HardwareType.BASE
+        is_whole_body = component.hardware_type == HardwareType.WHOLE_BODY
 
-        if is_base != isinstance(adapter, TwistBaseAdapter):
+        if is_base and not isinstance(adapter, TwistBaseAdapter):
+            raise TypeError(
+                f"Hardware type / adapter mismatch for '{component.hardware_id}': "
+                f"hardware_type={component.hardware_type.value} but got "
+                f"{type(adapter).__name__}"
+            )
+
+        if is_whole_body and not isinstance(adapter, WholeBodyAdapter):
             raise TypeError(
                 f"Hardware type / adapter mismatch for '{component.hardware_id}': "
                 f"hardware_type={component.hardware_type.value} but got "
@@ -369,8 +391,13 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
                 logger.warning(f"Hardware {component.hardware_id} already registered")
                 return False
 
-            if isinstance(adapter, TwistBaseAdapter):
-                connected: ConnectedHardware = ConnectedTwistBase(
+            if isinstance(adapter, WholeBodyAdapter):
+                connected: ConnectedHardware = ConnectedWholeBody(
+                    adapter=adapter,
+                    component=component,
+                )
+            elif isinstance(adapter, TwistBaseAdapter):
+                connected = ConnectedTwistBase(
                     adapter=adapter,
                     component=component,
                 )
@@ -447,10 +474,6 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
                     positions[joint_name] = joint_state.position
             return positions
 
-    # =========================================================================
-    # Task Management (RPC)
-    # =========================================================================
-
     @rpc
     def add_task(self, task: ControlTask) -> bool:
         """Register a task with the coordinator."""
@@ -492,10 +515,6 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
         """List currently active task names."""
         with self._task_lock:
             return [name for name, task in self._tasks.items() if task.is_active()]
-
-    # =========================================================================
-    # Streaming Control
-    # =========================================================================
 
     def _on_joint_command(self, msg: JointState) -> None:
         """Route incoming JointState to streaming tasks by joint name.
@@ -561,8 +580,8 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
                 if hw.component.hardware_type != HardwareType.BASE:
                     continue
                 for joint_name in hw.joint_names:
-                    # Extract suffix (e.g., "base_vx" → "vx")
-                    suffix = joint_name.rsplit("_", 1)[-1]
+                    # Extract suffix (e.g., "base/vx" → "vx")
+                    _, suffix = split_joint_name(joint_name)
                     mapping = TWIST_SUFFIX_MAP.get(suffix)
                     if mapping is None:
                         continue
@@ -604,10 +623,6 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
 
             return getattr(task, method)(**kwargs)
 
-    # =========================================================================
-    # Gripper
-    # =========================================================================
-
     @rpc
     def set_gripper_position(self, hardware_id: str, position: float) -> bool:
         """Set gripper position on a specific hardware device.
@@ -640,10 +655,6 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
             if isinstance(hw, ConnectedTwistBase):
                 return None
             return hw.adapter.read_gripper_position()
-
-    # =========================================================================
-    # Lifecycle
-    # =========================================================================
 
     @rpc
     def start(self) -> None:
@@ -758,16 +769,3 @@ class ControlCoordinator(Module[ControlCoordinatorConfig]):
     def get_tick_count(self) -> int:
         """Get the number of ticks since start."""
         return self._tick_loop.tick_count if self._tick_loop else 0
-
-
-# Blueprint export
-control_coordinator = ControlCoordinator.blueprint
-
-
-__all__ = [
-    "ControlCoordinator",
-    "ControlCoordinatorConfig",
-    "HardwareComponent",
-    "TaskConfig",
-    "control_coordinator",
-]

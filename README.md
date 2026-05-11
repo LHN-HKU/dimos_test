@@ -159,7 +159,7 @@ To set up your system dependencies, follow one of these guides:
 ```bash
 uv venv --python "3.12"
 source .venv/bin/activate
-uv pip install 'dimos[base,unitree]'
+uv pip install 'dimos[unitree]'
 
 # Replay a recorded quadruped session (no hardware needed)
 # NOTE: First run will show a black rerun window while ~75 MB downloads from LFS
@@ -167,8 +167,11 @@ dimos --replay run unitree-go2
 ```
 
 ```bash
-# Install with simulation support
-uv pip install 'dimos[base,unitree,sim]'
+# Add perception (object detection, VLMs — heavy dependencies, needs to download GBs)
+uv pip install 'dimos[unitree,perception]'
+
+# Add simulation support
+uv pip install 'dimos[unitree,sim]'
 
 # Run quadruped in MuJoCo simulation
 dimos --simulation run unitree-go2
@@ -188,8 +191,8 @@ dimos run unitree-go2
 | Run command | What it does |
 |-------------|-------------|
 | `dimos --replay run unitree-go2` | Quadruped navigation replay — SLAM, costmap, A* planning |
-| `dimos --replay --replay-dir unitree_go2_office_walk2 run unitree-go2-temporal-memory` | Quadruped temporal memory replay |
-| `dimos --simulation run unitree-go2-agentic-mcp` | Quadruped agentic + MCP server in simulation |
+| `dimos --replay --replay-db go2_bigoffice run unitree-go2-memory` | Quadruped temporal memory replay |
+| `dimos --simulation run unitree-go2-agentic` | Quadruped agentic + MCP server in simulation |
 | `dimos --simulation run unitree-g1` | Humanoid in MuJoCo simulation |
 | `dimos --replay run drone-basic` | Drone video + telemetry replay |
 | `dimos --replay run drone-agentic` | Drone + LLM agent with flight skills (replay) |
@@ -204,7 +207,7 @@ dimos run unitree-go2
 The `dimos` CLI manages the full lifecycle — run blueprints, inspect state, interact with agents, and call skills via MCP.
 
 ```bash
-dimos run unitree-go2-agentic-mcp --daemon   # Start in background
+dimos run unitree-go2-agentic --daemon   # Start in background
 dimos status                              # Check what's running
 dimos log -f                              # Follow logs
 dimos agent-send "explore the room"       # Send agent a command
@@ -224,7 +227,7 @@ See below a simple robot connection module that sends streams of continuous `cmd
 
 ```py
 import threading, time, numpy as np
-from dimos.core.blueprints import autoconnect
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import In, Out
@@ -270,17 +273,19 @@ Blueprints are instructions for how to construct and wire modules. We compose th
 
 Blueprints can be composed, remapped, and have transports overridden if `autoconnect()` fails due to conflicting variable names or `In[]` and `Out[]` message types.
 
-A blueprint example that connects the image stream from a robot to an LLM Agent for reasoning and action execution.
+A blueprint example that connects the image stream from a robot to an MCP-backed LLM agent for reasoning and action execution.
 ```py
-from dimos.core.blueprints import autoconnect
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import LCMTransport
 from dimos.msgs.sensor_msgs import Image
 from dimos.robot.unitree.go2.connection import go2_connection
-from dimos.agents.agent import agent
+from dimos.agents.mcp.mcp_client import McpClient
+from dimos.agents.mcp.mcp_server import McpServer
 
 blueprint = autoconnect(
     go2_connection(),
-    agent(),
+    McpServer.blueprint(),
+    McpClient.blueprint(),
 ).transports({("color_image", Image): LCMTransport("/color_image", Image)})
 
 # Run the blueprint
@@ -311,7 +316,7 @@ export GIT_LFS_SKIP_SMUDGE=1
 git clone -b dev https://github.com/dimensionalOS/dimos.git
 cd dimos
 
-uv sync --all-extras --no-extra dds
+uv sync --extra all
 
 # Run fast test suite
 uv run pytest dimos

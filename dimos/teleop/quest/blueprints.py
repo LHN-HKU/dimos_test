@@ -13,37 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Teleop blueprints for testing and deployment."""
+"""Teleop blueprints for testing and deployment.
 
-from dimos.control.blueprints import (
+Single sim/real blueprints — pass `--simulation` to run inside MuJoCo, omit for real
+hardware. The underlying coordinator blueprints branch on `global_config.simulation`.
+"""
+
+from dimos.control.blueprints.teleop import (
     coordinator_teleop_dual,
     coordinator_teleop_piper,
+    coordinator_teleop_xarm6,
     coordinator_teleop_xarm7,
 )
-from dimos.core.blueprints import autoconnect
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import LCMTransport
-from dimos.msgs.geometry_msgs import PoseStamped
-from dimos.teleop.quest.quest_extensions import arm_teleop_module, visualizing_teleop_module
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.teleop.quest.quest_extensions import ArmTeleopModule
 from dimos.teleop.quest.quest_types import Buttons
+from dimos.visualization.rerun.bridge import RerunBridgeModule
 
-# -----------------------------------------------------------------------------
-# Quest Teleop Blueprints
-# -----------------------------------------------------------------------------
-
-# Arm teleop with press-and-hold engage
-arm_teleop = autoconnect(
-    arm_teleop_module(),
-).transports(
-    {
-        ("left_controller_output", PoseStamped): LCMTransport("/teleop/left_delta", PoseStamped),
-        ("right_controller_output", PoseStamped): LCMTransport("/teleop/right_delta", PoseStamped),
-        ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
-    }
-)
-
-# Arm teleop with Rerun visualization
-arm_teleop_visualizing = autoconnect(
-    visualizing_teleop_module(),
+# Arm teleop with press-and-hold engage (has rerun viz)
+teleop_quest_rerun = autoconnect(
+    ArmTeleopModule.blueprint(),
+    RerunBridgeModule.blueprint(),
 ).transports(
     {
         ("left_controller_output", PoseStamped): LCMTransport("/teleop/left_delta", PoseStamped),
@@ -53,15 +45,9 @@ arm_teleop_visualizing = autoconnect(
 )
 
 
-# -----------------------------------------------------------------------------
-# Teleop wired to Coordinator (TeleopIK)
-# -----------------------------------------------------------------------------
-
-# Single XArm7 teleop: right controller -> xarm7
-# Usage: dimos run arm-teleop-xarm7
-
-arm_teleop_xarm7 = autoconnect(
-    arm_teleop_module(task_names={"right": "teleop_xarm"}),
+# XArm7 teleop (sim with --simulation, real otherwise): right controller -> xarm7
+teleop_quest_xarm7 = autoconnect(
+    ArmTeleopModule.blueprint(task_names={"right": "teleop_xarm"}),
     coordinator_teleop_xarm7,
 ).transports(
     {
@@ -73,10 +59,9 @@ arm_teleop_xarm7 = autoconnect(
 )
 
 
-# Single Piper teleop: left controller -> piper arm
-# Usage: dimos run arm-teleop-piper
-arm_teleop_piper = autoconnect(
-    arm_teleop_module(task_names={"left": "teleop_piper"}),
+# Piper teleop (sim with --simulation, real otherwise): left controller -> piper arm
+teleop_quest_piper = autoconnect(
+    ArmTeleopModule.blueprint(task_names={"left": "teleop_piper"}),
     coordinator_teleop_piper,
 ).transports(
     {
@@ -88,9 +73,23 @@ arm_teleop_piper = autoconnect(
 )
 
 
-# Dual arm teleop: right -> piper, left -> xarm6 (TeleopIK)
-arm_teleop_dual = autoconnect(
-    arm_teleop_module(task_names={"right": "teleop_piper", "left": "teleop_xarm"}),
+# XArm6 teleop (sim with --simulation, real otherwise): right controller -> xarm6
+teleop_quest_xarm6 = autoconnect(
+    ArmTeleopModule.blueprint(task_names={"right": "teleop_xarm"}),
+    coordinator_teleop_xarm6,
+).transports(
+    {
+        ("right_controller_output", PoseStamped): LCMTransport(
+            "/coordinator/cartesian_command", PoseStamped
+        ),
+        ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
+    }
+)
+
+
+# Dual arm teleop: right -> piper, left -> xarm6 (TeleopIK, real-only)
+teleop_quest_dual = autoconnect(
+    ArmTeleopModule.blueprint(task_names={"right": "teleop_piper", "left": "teleop_xarm"}),
     coordinator_teleop_dual,
 ).transports(
     {
@@ -106,9 +105,9 @@ arm_teleop_dual = autoconnect(
 
 
 __all__ = [
-    "arm_teleop",
-    "arm_teleop_dual",
-    "arm_teleop_piper",
-    "arm_teleop_visualizing",
-    "arm_teleop_xarm7",
+    "teleop_quest_dual",
+    "teleop_quest_piper",
+    "teleop_quest_rerun",
+    "teleop_quest_xarm6",
+    "teleop_quest_xarm7",
 ]

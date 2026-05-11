@@ -173,15 +173,13 @@ Modules in DimOS automatically get a `frame_id` property. This is controlled by 
 
 ```python
 from dimos.core.module import Module, ModuleConfig
-from dataclasses import dataclass
 
-@dataclass
 class MyModuleConfig(ModuleConfig):
     frame_id: str = "sensor_link"
     frame_id_prefix: str | None = None
 
-class MySensorModule(Module[MyModuleConfig]):
-    default_config = MyModuleConfig
+class MySensorModule(Module):
+    config: MyModuleConfig
 
 # With default config:
 sensor = MySensorModule()
@@ -228,8 +226,6 @@ from dimos.core.module_coordinator import ModuleCoordinator
 
 class RobotBaseModule(Module):
     """Publishes the robot's position in the world frame at 10Hz."""
-    def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)
 
     @rpc
     def start(self) -> None:
@@ -245,7 +241,7 @@ class RobotBaseModule(Module):
             )
             self.tf.publish(robot_pose)
 
-        self._disposables.add(
+        self.register_disposable(
             rx.interval(0.1).subscribe(publish_pose)
         )
 
@@ -272,7 +268,7 @@ class CameraModule(Module):
             )
             self.tf.publish(camera_mount, optical_frame)
 
-        self._disposables.add(
+        self.register_disposable(
             rx.interval(0.1).subscribe(publish_transforms)
         )
 
