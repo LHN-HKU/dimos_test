@@ -22,6 +22,7 @@
 #include "livox_sdk_config.hpp"
 
 #include "dimos_native_module.hpp"
+#include "raw_lidar_scan.hpp"
 
 #include "geometry_msgs/Quaternion.hpp"
 #include "geometry_msgs/Vector3.hpp"
@@ -41,6 +42,7 @@ using livox_common::DATA_TYPE_CARTESIAN_LOW;
 static std::atomic<bool> g_running{true};
 static lcm::LCM* g_lcm = nullptr;
 static std::string g_lidar_topic;
+static std::string g_raw_lidar_topic;
 static std::string g_imu_topic;
 static std::string g_frame_id = "lidar_link";
 static std::string g_imu_frame_id = "imu_link";
@@ -50,6 +52,8 @@ static float g_frequency = 10.0f;
 static std::mutex g_pc_mutex;
 static std::vector<float> g_accumulated_xyz;       // interleaved x,y,z
 static std::vector<float> g_accumulated_intensity;  // per-point intensity
+static std::vector<dimos::raw_lidar::Point> g_accumulated_raw;  // per-point full record
+static uint64_t g_frame_start_ns = 0;              // packet ts of first packet in current frame
 static double g_frame_timestamp = 0.0;
 static bool g_frame_has_timestamp = false;
 
@@ -57,10 +61,10 @@ static bool g_frame_has_timestamp = false;
 // Helpers
 // ---------------------------------------------------------------------------
 
-static double get_timestamp_ns(const LivoxLidarEthernetPacket* pkt) {
+static uint64_t get_timestamp_ns(const LivoxLidarEthernetPacket* pkt) {
     uint64_t ns = 0;
     std::memcpy(&ns, pkt->timestamp, sizeof(uint64_t));
-    return static_cast<double>(ns);
+    return ns;
 }
 
 using dimos::time_from_seconds;
@@ -69,6 +73,28 @@ using dimos::make_header;
 // ---------------------------------------------------------------------------
 // Build and publish PointCloud2
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Publish RawLidarScan (per-point: offset_time_ns, line, reflectivity, tag).
+// Hand-rolled binary payload; no dimos-lcm schema.
+// ---------------------------------------------------------------------------
+
+static void publish_raw_lidar(const std::vector<dimos::raw_lidar::Point>& points, double timestamp) {
+    if (!g_lcm || g_raw_lidar_topic.empty() || points.empty()) return;
+    dimos::raw_lidar::ScanHeader header;
+    header.ts_sec = static_cast<int32_t>(timestamp);
+    double frac = timestamp - static_cast<double>(header.ts_sec);
+    if (frac < 0.0) {
+        header.ts_sec -= 1;
+        frac += 1.0;
+    }
+    header.ts_nsec = static_cast<uint32_t>(frac * 1e9);
+    header.frame_id = g_frame_id;
+
+    std::vector<uint8_t> payload;
+    dimos::raw_lidar::encode(payload, header, points.data(), static_cast<uint32_t>(points.size()));
+    g_lcm->publish(g_raw_lidar_topic, payload.data(), payload.size());
+}
 
 static void publish_pointcloud(const std::vector<float>& xyz,
                                const std::vector<float>& intensity,
@@ -128,34 +154,49 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
                            LivoxLidarEthernetPacket* data, void* /*client_data*/) {
     if (!g_running.load() || data == nullptr) return;
 
-    double ts_ns = get_timestamp_ns(data);
-    double ts = ts_ns / 1e9;
+    uint64_t ts_ns = get_timestamp_ns(data);
+    double ts = static_cast<double>(ts_ns) / 1e9;
     uint16_t dot_num = data->dot_num;
 
     std::lock_guard<std::mutex> lock(g_pc_mutex);
 
     if (!g_frame_has_timestamp) {
         g_frame_timestamp = ts;
+        g_frame_start_ns = ts_ns;
         g_frame_has_timestamp = true;
     }
+
+    const uint32_t pkt_offset_ns = static_cast<uint32_t>(ts_ns - g_frame_start_ns);
 
     if (data->data_type == DATA_TYPE_CARTESIAN_HIGH) {
         auto* pts = reinterpret_cast<const LivoxLidarCartesianHighRawPoint*>(data->data);
         for (uint16_t i = 0; i < dot_num; ++i) {
-            // Livox high-precision coordinates are in mm, convert to meters
-            g_accumulated_xyz.push_back(static_cast<float>(pts[i].x) / 1000.0f);
-            g_accumulated_xyz.push_back(static_cast<float>(pts[i].y) / 1000.0f);
-            g_accumulated_xyz.push_back(static_cast<float>(pts[i].z) / 1000.0f);
+            float x = static_cast<float>(pts[i].x) / 1000.0f;
+            float y = static_cast<float>(pts[i].y) / 1000.0f;
+            float z = static_cast<float>(pts[i].z) / 1000.0f;
+            g_accumulated_xyz.push_back(x);
+            g_accumulated_xyz.push_back(y);
+            g_accumulated_xyz.push_back(z);
             g_accumulated_intensity.push_back(static_cast<float>(pts[i].reflectivity) / 255.0f);
+            if (!g_raw_lidar_topic.empty()) {
+                dimos::raw_lidar::Point rp{x, y, z, pts[i].reflectivity, pkt_offset_ns, 0, pts[i].tag};
+                g_accumulated_raw.push_back(rp);
+            }
         }
     } else if (data->data_type == DATA_TYPE_CARTESIAN_LOW) {
         auto* pts = reinterpret_cast<const LivoxLidarCartesianLowRawPoint*>(data->data);
         for (uint16_t i = 0; i < dot_num; ++i) {
-            // Livox low-precision coordinates are in cm, convert to meters
-            g_accumulated_xyz.push_back(static_cast<float>(pts[i].x) / 100.0f);
-            g_accumulated_xyz.push_back(static_cast<float>(pts[i].y) / 100.0f);
-            g_accumulated_xyz.push_back(static_cast<float>(pts[i].z) / 100.0f);
+            float x = static_cast<float>(pts[i].x) / 100.0f;
+            float y = static_cast<float>(pts[i].y) / 100.0f;
+            float z = static_cast<float>(pts[i].z) / 100.0f;
+            g_accumulated_xyz.push_back(x);
+            g_accumulated_xyz.push_back(y);
+            g_accumulated_xyz.push_back(z);
             g_accumulated_intensity.push_back(static_cast<float>(pts[i].reflectivity) / 255.0f);
+            if (!g_raw_lidar_topic.empty()) {
+                dimos::raw_lidar::Point rp{x, y, z, pts[i].reflectivity, pkt_offset_ns, 0, pts[i].tag};
+                g_accumulated_raw.push_back(rp);
+            }
         }
     }
 }
@@ -231,9 +272,10 @@ int main(int argc, char** argv) {
     // Required: LCM topics for ports
     g_lidar_topic = mod.has("lidar") ? mod.topic("lidar") : "";
     g_imu_topic = mod.has("imu") ? mod.topic("imu") : "";
+    g_raw_lidar_topic = mod.has("raw_lidar") ? mod.topic("raw_lidar") : "";
 
-    if (g_lidar_topic.empty()) {
-        fprintf(stderr, "Error: --lidar <topic> is required\n");
+    if (g_lidar_topic.empty() && g_raw_lidar_topic.empty()) {
+        fprintf(stderr, "Error: at least one of --lidar or --raw_lidar is required\n");
         return 1;
     }
 
@@ -259,7 +301,8 @@ int main(int argc, char** argv) {
     ports.host_log_data   = mod.arg_int("host_log_data_port", port_defaults.host_log_data);
 
     printf("[mid360] Starting native Livox Mid-360 module\n");
-    printf("[mid360] lidar topic: %s\n", g_lidar_topic.c_str());
+    printf("[mid360] lidar topic: %s\n", g_lidar_topic.empty() ? "(disabled)" : g_lidar_topic.c_str());
+    printf("[mid360] raw_lidar topic: %s\n", g_raw_lidar_topic.empty() ? "(disabled)" : g_raw_lidar_topic.c_str());
     printf("[mid360] imu topic: %s\n", g_imu_topic.empty() ? "(disabled)" : g_imu_topic.c_str());
     printf("[mid360] host_ip: %s  lidar_ip: %s  frequency: %.1f Hz\n",
            host_ip.c_str(), lidar_ip.c_str(), g_frequency);
@@ -311,20 +354,25 @@ int main(int argc, char** argv) {
             // Swap out the accumulated data
             std::vector<float> xyz;
             std::vector<float> intensity;
+            std::vector<dimos::raw_lidar::Point> raw;
             double ts = 0.0;
 
             {
                 std::lock_guard<std::mutex> lock(g_pc_mutex);
-                if (!g_accumulated_xyz.empty()) {
+                if (!g_accumulated_xyz.empty() || !g_accumulated_raw.empty()) {
                     xyz.swap(g_accumulated_xyz);
                     intensity.swap(g_accumulated_intensity);
+                    raw.swap(g_accumulated_raw);
                     ts = g_frame_timestamp;
                     g_frame_has_timestamp = false;
                 }
             }
 
-            if (!xyz.empty()) {
+            if (!g_lidar_topic.empty() && !xyz.empty()) {
                 publish_pointcloud(xyz, intensity, ts);
+            }
+            if (!raw.empty()) {
+                publish_raw_lidar(raw, ts);
             }
 
             last_emit = now;

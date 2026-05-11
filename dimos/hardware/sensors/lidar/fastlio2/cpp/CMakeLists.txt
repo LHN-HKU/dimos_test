@@ -63,15 +63,6 @@ find_package(Sophus REQUIRED)
 # yaml-cpp (FAST-LIO config parsing — standard YAML format)
 find_package(yaml-cpp REQUIRED)
 
-# Livox SDK2 (from nix or /usr/local fallback)
-find_library(LIVOX_SDK livox_lidar_sdk_shared)
-if(NOT LIVOX_SDK)
-  message(FATAL_ERROR "Livox SDK2 not found. Available via nix flake in lidar/livox/")
-endif()
-get_filename_component(LIVOX_SDK_LIB_DIR ${LIVOX_SDK} DIRECTORY)
-get_filename_component(LIVOX_SDK_PREFIX ${LIVOX_SDK_LIB_DIR} DIRECTORY)
-set(LIVOX_SDK_INCLUDE_DIR ${LIVOX_SDK_PREFIX}/include)
-
 add_executable(fastlio2_native
   main.cpp
   ${FASTLIO_DIR}/src/utils.cpp
@@ -83,9 +74,9 @@ add_executable(fastlio2_native
   ${FASTLIO_DIR}/src/map_builder/map_builder.cpp
 )
 
-# Shared Livox common headers (livox_sdk_config.hpp etc.)
-if(NOT LIVOX_COMMON_DIR)
-  set(LIVOX_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../common)
+# Shared lidar headers — dimos_native_module.hpp + raw_lidar_scan.hpp.
+if(NOT LIDAR_COMMON_DIR)
+  set(LIDAR_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../common)
 endif()
 
 target_include_directories(fastlio2_native PRIVATE
@@ -98,13 +89,11 @@ target_include_directories(fastlio2_native PRIVATE
   ${PCL_INCLUDE_DIRS}
   ${Sophus_INCLUDE_DIRS}
   ${CMAKE_CURRENT_SOURCE_DIR}
-  ${LIVOX_COMMON_DIR}
-  ${LIVOX_SDK_INCLUDE_DIR}
+  ${LIDAR_COMMON_DIR}
 )
 
 target_link_libraries(fastlio2_native PRIVATE
   ${LCM_LIBRARIES}
-  ${LIVOX_SDK}
   ${PCL_LIBRARIES}
   Sophus::Sophus
   yaml-cpp::yaml-cpp

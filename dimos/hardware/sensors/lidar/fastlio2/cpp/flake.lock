@@ -17,23 +17,6 @@
         "type": "github"
       }
     },
-    "dimos-lcm_2": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1769774949,
-        "narHash": "sha256-icRK7jerqNlwK1WZBrnIP04I2WozzFqTD7qsmnPxQuo=",
-        "owner": "dimensionalOS",
-        "repo": "dimos-lcm",
-        "rev": "0aa72b7b1bd3a65f50f5c03485ee9b728df56afe",
-        "type": "github"
-      },
-      "original": {
-        "owner": "dimensionalOS",
-        "ref": "main",
-        "repo": "dimos-lcm",
-        "type": "github"
-      }
-    },
     "fast-lio": {
       "flake": false,
       "locked": {
@@ -92,29 +75,6 @@
         "type": "github"
       }
     },
-    "livox-sdk": {
-      "inputs": {
-        "dimos-lcm": "dimos-lcm_2",
-        "flake-utils": [
-          "flake-utils"
-        ],
-        "lcm-extended": [
-          "lcm-extended"
-        ],
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "path": "../../livox/cpp",
-        "type": "path"
-      },
-      "original": {
-        "path": "../../livox/cpp",
-        "type": "path"
-      },
-      "parent": []
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1770841267,
@@ -137,7 +97,6 @@
         "fast-lio": "fast-lio",
         "flake-utils": "flake-utils",
         "lcm-extended": "lcm-extended",
-        "livox-sdk": "livox-sdk",
         "nixpkgs": "nixpkgs"
       }
     },

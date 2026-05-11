@@ -1,13 +1,9 @@
 {
-  description = "FAST-LIO2 + Livox Mid-360 native module";
+  description = "FAST-LIO2 pure native module (LCM in → LCM out, no hardware SDK)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    livox-sdk.url = "path:../../livox/cpp";
-    livox-sdk.inputs.nixpkgs.follows = "nixpkgs";
-    livox-sdk.inputs.flake-utils.follows = "flake-utils";
-    livox-sdk.inputs.lcm-extended.follows = "lcm-extended";
     dimos-lcm = {
       url = "github:dimensionalOS/dimos-lcm/main";
       flake = false;
@@ -23,7 +19,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, livox-sdk, dimos-lcm, fast-lio, lcm-extended, ... }:
+  outputs = { self, nixpkgs, flake-utils, dimos-lcm, fast-lio, lcm-extended, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         # Overlay fixes for darwin-broken nixpkgs recipes in our transitive
@@ -61,22 +57,20 @@
           inherit system;
           overlays = [ darwinDepFixes ];
         };
-        livox-sdk2 = livox-sdk.packages.${system}.livox-sdk2;
         lcm = lcm-extended.packages.${system}.lcm;
 
-        livox-common = ../../common;
+        lidar-common = ../../common;
 
         fastlio2_native = pkgs.stdenv.mkDerivation {
           pname = "fastlio2_native";
-          version = "0.2.0";
+          version = "0.3.0";
 
           src = ./.;
 
           nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
           buildInputs = [
-            livox-sdk2
             lcm
-            pkgs.glib
+            pkgs.glib       # transitive: lcm pkgconfig pulls in glib-2.0
             pkgs.eigen
             pkgs.pcl
             pkgs.yaml-cpp
@@ -89,7 +83,7 @@
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DFETCHCONTENT_SOURCE_DIR_DIMOS_LCM=${dimos-lcm}"
             "-DFASTLIO_DIR=${fast-lio}"
-            "-DLIVOX_COMMON_DIR=${livox-common}"
+            "-DLIDAR_COMMON_DIR=${lidar-common}"
           ];
         };
       in {

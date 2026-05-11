@@ -46,6 +46,7 @@ from dimos.hardware.sensors.lidar.livox.ports import (
 )
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.sensor_msgs.RawLidarScan import RawLidarScan
 from dimos.spec import perception
 
 
@@ -79,13 +80,16 @@ class Mid360(NativeModule, perception.Lidar, perception.IMU):
     """Livox Mid-360 LiDAR module backed by a native C++ binary.
 
     Ports:
-        lidar (Out[PointCloud2]): Point cloud frames at configured frequency.
+        lidar (Out[PointCloud2]): Filtered point cloud frames at configured frequency.
+        raw_lidar (Out[RawLidarScan]): Per-point raw scans (xyz + reflectivity +
+            offset_time_ns + line + tag) for downstream SLAM (e.g. FastLio2).
         imu (Out[Imu]): IMU data at ~200 Hz (if enabled).
     """
 
     config: Mid360Config
 
     lidar: Out[PointCloud2]
+    raw_lidar: Out[RawLidarScan]
     imu: Out[Imu]
 
     @rpc
