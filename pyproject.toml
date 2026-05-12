@@ -285,6 +285,7 @@ dev = [
     "types-psutil>=7.2.2.20260130,<8",
     "types-psycopg2>=2.9.21.20251012",
     "types-pytz>=2025.2.0.20250809,<2026",
+    "types-reportlab>=4.5.0",
     "types-simplejson>=3.20.0.20250822,<4",
     "types-tabulate>=0.9.0.20241207,<1",
     "types-tensorflow>=2.18.0.20251008,<3",
@@ -353,8 +354,13 @@ base = [
 ]
 
 # All extras except dds and unitree-dds (which require special system setup).
+apriltag = [
+    "opencv-contrib-python==4.10.0.84",
+    "reportlab>=4.5.0",
+]
+
 all = [
-    "dimos[agents,base,cpu,cuda,dev,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web]",
+    "dimos[agents,apriltag,base,cpu,cuda,dev,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web]",
 ]
 
 [tool.uv]
