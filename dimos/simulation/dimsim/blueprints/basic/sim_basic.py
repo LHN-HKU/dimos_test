@@ -21,8 +21,8 @@ from dimos.core.global_config import global_config
 from dimos.core.transport import JpegLcmTransport
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.protocol.pubsub.impl.lcmpubsub import LCM
-from dimos.robot.sim.bridge import sim_bridge
-from dimos.robot.sim.tf_module import sim_tf
+from dimos.simulation.dimsim.bridge import sim_bridge
+from dimos.simulation.dimsim.adapter import sim_adapter
 from dimos.visualization.vis_module import vis_module
 
 
@@ -187,7 +187,7 @@ sim_basic = autoconnect(
         foxglove_config={"shm_channels": ["/color_image#sensor_msgs.Image"]},
     ),
     sim_bridge(),
-    sim_tf(),
+    sim_adapter(),
 ).global_config(n_workers=4, robot_model="dimsim")
 
 __all__ = ["sim_basic"]

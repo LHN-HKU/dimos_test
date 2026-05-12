@@ -12,20 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DimSim sequential eval blueprint — full stack with visualization.
-
-Same as sim_temporal_memory. Use this for single-instance eval runs where
-you want rerun + browser open to watch the agent.
-
-For parallel (headless, multi-instance) evals, use sim-parallel-eval instead.
-
-Usage:
-    dimos --simulation run sim-eval
-"""
+"""DimSim spatial blueprint — nav + spatial memory."""
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.robot.sim.blueprints.agentic.sim_temporal_memory import sim_temporal_memory
+from dimos.perception.spatial_perception import SpatialMemory
+from dimos.simulation.dimsim.blueprints.nav.sim_nav import sim_nav
 
-sim_eval = autoconnect(sim_temporal_memory)
+sim_spatial = autoconnect(
+    sim_nav,
+    SpatialMemory.blueprint(),
+).global_config(n_workers=8)
 
-__all__ = ["sim_eval"]
+__all__ = ["sim_spatial"]

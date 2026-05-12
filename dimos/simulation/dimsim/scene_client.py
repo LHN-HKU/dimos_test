@@ -21,7 +21,7 @@ hatch for arbitrary Three.js code.
 
 Usage::
 
-    from dimos.robot.sim.scene_client import SceneClient
+    from dimos.simulation.dimsim.scene_client import SceneClient
 
     scene = SceneClient()                      # connects to ws://localhost:8090
     scene.load_map("https://example.com/map.glb")

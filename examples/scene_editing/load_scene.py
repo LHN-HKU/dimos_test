@@ -24,7 +24,7 @@ Try it:
 
 import sys
 
-from dimos.robot.sim.scene_client import SceneClient
+from dimos.simulation.dimsim.scene_client import SceneClient
 
 if len(sys.argv) < 2:
     print("Usage: python load_scene.py /path/to/scene.glb")

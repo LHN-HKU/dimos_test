@@ -39,8 +39,8 @@ from dimos.navigation.frontier_exploration.wavefront_frontier_goal_selector impo
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.perception.experimental.temporal_memory.temporal_memory import TemporalMemory
 from dimos.perception.spatial_perception import SpatialMemory
-from dimos.robot.sim.bridge import sim_bridge
-from dimos.robot.sim.tf_module import sim_tf
+from dimos.simulation.dimsim.bridge import sim_bridge
+from dimos.simulation.dimsim.adapter import sim_adapter
 from dimos.utils.data import DIMOS_PROJECT_ROOT
 
 # Per-instance isolation: separate ChromaDB + visual memory paths
@@ -60,7 +60,7 @@ sim_parallel_eval = autoconnect(
     # sim_basic (headless — no visualization)
     _transports,
     sim_bridge(),
-    sim_tf(),
+    sim_adapter(),
     # sim_nav
     VoxelGridMapper.blueprint(voxel_size=0.1),
     CostMapper.blueprint(),

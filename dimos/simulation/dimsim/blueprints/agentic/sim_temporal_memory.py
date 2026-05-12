@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DimSim spatial blueprint — nav + spatial memory."""
+"""DimSim temporal memory blueprint — agentic + temporal memory."""
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.perception.spatial_perception import SpatialMemory
-from dimos.robot.sim.blueprints.nav.sim_nav import sim_nav
+from dimos.perception.experimental.temporal_memory.temporal_memory import TemporalMemory
+from dimos.simulation.dimsim.blueprints.agentic.sim_agentic import sim_agentic
 
-sim_spatial = autoconnect(
-    sim_nav,
-    SpatialMemory.blueprint(),
-).global_config(n_workers=8)
+sim_temporal_memory = autoconnect(
+    sim_agentic,
+    TemporalMemory.blueprint(),
+)
 
-__all__ = ["sim_spatial"]
+__all__ = ["sim_temporal_memory"]

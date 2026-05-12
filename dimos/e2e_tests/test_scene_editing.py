@@ -38,7 +38,7 @@ import time
 
 import pytest
 
-from dimos.robot.sim.scene_client import EMBODIMENT_PRESETS, SceneClient
+from dimos.simulation.dimsim.scene_client import EMBODIMENT_PRESETS, SceneClient
 
 PORT = 8091  # Use different port to avoid conflicts with other tests
 

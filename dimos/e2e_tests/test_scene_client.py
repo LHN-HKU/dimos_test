@@ -34,7 +34,7 @@ import time
 
 import pytest
 
-from dimos.robot.sim.scene_client import SceneClient, SceneExecError
+from dimos.simulation.dimsim.scene_client import SceneClient, SceneExecError
 
 PORT = 8090
 SOLDIER_URL = "https://threejs.org/examples/models/gltf/Soldier.glb"

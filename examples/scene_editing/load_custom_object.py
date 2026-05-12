@@ -15,7 +15,7 @@
 
 """Create a custom object from code (no GLB needed)."""
 
-from dimos.robot.sim.scene_client import SceneClient
+from dimos.simulation.dimsim.scene_client import SceneClient
 
 with SceneClient() as scene:
     scene.add_object(

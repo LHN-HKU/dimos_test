@@ -24,13 +24,13 @@ Architecture:
     cmd_vel Twist) pass through directly via DimSim's --topic-remap flag.
     Ports that need type conversion (odom PoseStamped → Odometry,
     color_image JPEG → Image, synthesized CameraInfo) are handled by a
-    separate ``DimSimAdapter`` module — see ``dimos/robot/sim/adapter.py``.
+    separate ``DimSimAdapter`` module — see ``dimos/simulation/dimsim/adapter.py``.
 
 Usage::
 
     from dimos.core.coordination.blueprints import autoconnect
-    from dimos.robot.sim.bridge import DimSimBridge
-    from dimos.robot.sim.adapter import DimSimAdapter
+    from dimos.simulation.dimsim.bridge import DimSimBridge
+    from dimos.simulation.dimsim.adapter import DimSimAdapter
 
     autoconnect(
         DimSimBridge.blueprint(scene="apt", vehicle_height=0.3),

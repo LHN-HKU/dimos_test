@@ -24,7 +24,7 @@ from dimos.navigation.frontier_exploration.wavefront_frontier_goal_selector impo
     WavefrontFrontierExplorer,
 )
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
-from dimos.robot.sim.blueprints.basic.sim_basic import sim_basic
+from dimos.simulation.dimsim.blueprints.basic.sim_basic import sim_basic
 
 sim_nav = autoconnect(
     sim_basic,

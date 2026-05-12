@@ -27,9 +27,9 @@ from dimos.core.transport import JpegLcmTransport
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_stack.main import create_nav_stack, nav_stack_rerun_config
-from dimos.robot.sim.adapter import DimSimAdapter
-from dimos.robot.sim.bridge import DimSimBridge
-from dimos.robot.sim.jpeg_lcm import SimJpegLCM
+from dimos.simulation.dimsim.adapter import DimSimAdapter
+from dimos.simulation.dimsim.bridge import DimSimBridge
+from dimos.simulation.dimsim.jpeg_lcm import SimJpegLCM
 from dimos.visualization.vis_module import vis_module
 
 

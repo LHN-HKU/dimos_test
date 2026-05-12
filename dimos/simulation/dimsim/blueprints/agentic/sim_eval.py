@@ -12,15 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DimSim temporal memory blueprint — agentic + temporal memory."""
+"""DimSim sequential eval blueprint — full stack with visualization.
+
+Same as sim_temporal_memory. Use this for single-instance eval runs where
+you want rerun + browser open to watch the agent.
+
+For parallel (headless, multi-instance) evals, use sim-parallel-eval instead.
+
+Usage:
+    dimos --simulation run sim-eval
+"""
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.perception.experimental.temporal_memory.temporal_memory import TemporalMemory
-from dimos.robot.sim.blueprints.agentic.sim_agentic import sim_agentic
+from dimos.simulation.dimsim.blueprints.agentic.sim_temporal_memory import sim_temporal_memory
 
-sim_temporal_memory = autoconnect(
-    sim_agentic,
-    TemporalMemory.blueprint(),
-)
+sim_eval = autoconnect(sim_temporal_memory)
 
-__all__ = ["sim_temporal_memory"]
+__all__ = ["sim_eval"]
