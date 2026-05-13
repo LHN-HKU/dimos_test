@@ -65,9 +65,6 @@ class LCMResourceLogger:
 
         self._transport: pLCMTransport[dict[str, Any]] = pLCMTransport(topic)
 
-    def stop(self):
-        self._transport.stop()
-
     def log_stats(self, coordinator: ProcessStats, workers: list[WorkerStats]) -> None:
         self._transport.broadcast(
             None,
