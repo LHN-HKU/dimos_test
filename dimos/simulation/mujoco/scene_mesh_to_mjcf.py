@@ -54,6 +54,10 @@ _GEOM_LINE = (
     '      <geom name="{name}" type="mesh" mesh="{mesh}" '
     'contype="1" conaffinity="1" group="3" rgba="0.6 0.6 0.6 1"/>'
 )
+_VISUAL_GEOM_LINE = (
+    '      <geom name="{name}" type="mesh" mesh="{mesh}" '
+    'contype="0" conaffinity="0" group="2" rgba="0.6 0.6 0.6 1"/>'
+)
 _BOX_GEOM_LINE = (
     '      <geom name="{name}" type="box" pos="{pos}" quat="{quat}" size="{size}" '
     'contype="1" conaffinity="1" group="3" rgba="0.6 0.6 0.6 1"/>'
@@ -61,9 +65,11 @@ _BOX_GEOM_LINE = (
 _DEGENERATE_EPS = 1e-3
 _SHELL_VOLUME_M3 = 2.0
 _CACHE_KEY_LEN = 12
-_CACHE_SCHEMA_VERSION = "thin-box-fallback-v1"
+_CACHE_SCHEMA_VERSION = "visual-proxy-v1"
 _VHACD_MAX_HULLS = 64
 _VHACD_RESOLUTION = 200_000
+_VHACD_MIN_COMPONENTS = 512
+_COMPONENT_VHACD_MAX_SCENE_PRIMS = 256
 _MIN_HULL_EXTENT_M = 5e-3
 _FALLBACK_BOX_THICKNESS_M = 0.03
 _MIN_FALLBACK_BOX_EXTENT_M = 0.25
@@ -79,6 +85,7 @@ class _BakeArtifacts:
     n_hulls: int
     n_decomposed: int
     n_box_fallbacks: int
+    n_visuals: int
 
 
 def bake_scene_mjcf(
@@ -87,6 +94,7 @@ def bake_scene_mjcf(
     alignment: SceneMeshAlignment | None = None,
     meshdir: str | Path | None = None,
     cache_root: Path | None = None,
+    include_visual_mesh: bool = False,
 ) -> Path:
     """Convert ``scene_mesh_path`` to OBJ and emit a wrapped MJCF.
 
@@ -103,6 +111,9 @@ def bake_scene_mjcf(
             should pass this explicitly.
         cache_root: override for the cache directory (defaults to
             ``~/.cache/dimos/scene_meshes``).
+        include_visual_mesh: also add the original scene prim meshes as
+            non-colliding visual geoms.  Useful for material-batched scenes
+            where convex collision proxies are too coarse to inspect.
 
     Returns:
         Path to the wrapper MJCF.  Pass this to ``MujocoSimModule``
@@ -119,7 +130,13 @@ def bake_scene_mjcf(
 
     meshdir = Path(meshdir).expanduser().resolve() if meshdir else robot_mjcf_path.parent
 
-    cache_key = _cache_key(scene_mesh_path, robot_mjcf_path, align, meshdir)
+    cache_key = _cache_key(
+        scene_mesh_path,
+        robot_mjcf_path,
+        align,
+        meshdir,
+        include_visual_mesh=include_visual_mesh,
+    )
     root = (cache_root or CACHE_DIR).expanduser()
     cache_dir = root / cache_key
     wrapper_path = cache_dir / "wrapper.xml"
@@ -134,7 +151,11 @@ def bake_scene_mjcf(
     prims = load_scene_prims(scene_mesh_path, alignment=align)
     logger.info(f"bake_scene_mjcf: {len(prims)} prims to bake")
 
-    artifacts = _bake_collision_hulls(prims, cache_dir)
+    artifacts = _bake_collision_hulls(
+        prims,
+        cache_dir,
+        include_visual_mesh=include_visual_mesh,
+    )
     if not artifacts.asset_lines and not artifacts.geom_lines:
         raise RuntimeError(
             "bake_scene_mjcf: every hull came out degenerate; nothing left to collide against"
@@ -143,6 +164,7 @@ def bake_scene_mjcf(
         f"bake_scene_mjcf: baked {artifacts.n_hulls} convex hulls from {len(prims)} prims "
         f"({artifacts.total_tris} tris total), VHACD-decomposed {artifacts.n_decomposed} "
         f"shell prims, added {artifacts.n_box_fallbacks} thin box fallbacks, "
+        f"added {artifacts.n_visuals} visual passthrough meshes, "
         f"skipped {artifacts.skipped_degenerate} degenerate hulls"
     )
 
@@ -162,6 +184,8 @@ def _cache_key(
     robot_mjcf_path: Path,
     alignment: SceneMeshAlignment,
     meshdir: Path,
+    *,
+    include_visual_mesh: bool,
 ) -> str:
     def _file_signature(path: Path) -> str:
         stat = path.stat()
@@ -173,6 +197,7 @@ def _cache_key(
     h.update(_file_signature(robot_mjcf_path).encode())
     h.update(repr(sorted(asdict(alignment).items())).encode())
     h.update(str(meshdir).encode())
+    h.update(str(include_visual_mesh).encode())
     return h.hexdigest()[:_CACHE_KEY_LEN]
 
 
@@ -180,7 +205,12 @@ def _cache_hit(wrapper_path: Path, cache_dir: Path) -> bool:
     return wrapper_path.exists() and any(cache_dir.glob("*.obj"))
 
 
-def _bake_collision_hulls(prims: list[Any], cache_dir: Path) -> _BakeArtifacts:
+def _bake_collision_hulls(
+    prims: list[Any],
+    cache_dir: Path,
+    *,
+    include_visual_mesh: bool = False,
+) -> _BakeArtifacts:
     import trimesh
 
     asset_lines: list[str] = []
@@ -190,8 +220,20 @@ def _bake_collision_hulls(prims: list[Any], cache_dir: Path) -> _BakeArtifacts:
     n_hulls = 0
     n_decomposed = 0
     n_box_fallbacks = 0
+    n_visuals = 0
+    component_vhacd = len(prims) <= _COMPONENT_VHACD_MAX_SCENE_PRIMS
     logger.info(f"bake_scene_mjcf: per-prim convex-hulling {len(prims)} prims (one-time)")
     for prim in prims:
+        if include_visual_mesh:
+            asset_name = f"{prim.name}_visual"
+            obj_file = cache_dir / f"{asset_name}.obj"
+            _write_mesh_obj(obj_file, prim.vertices, prim.triangles)
+            asset_lines.append(_ASSET_LINE.format(name=asset_name, file=str(obj_file)))
+            geom_lines.append(
+                _VISUAL_GEOM_LINE.format(name=f"{asset_name}_geom", mesh=asset_name)
+            )
+            n_visuals += 1
+
         tm = trimesh.Trimesh(
             vertices=prim.vertices.astype(np.float64),
             faces=prim.triangles,
@@ -212,7 +254,12 @@ def _bake_collision_hulls(prims: list[Any], cache_dir: Path) -> _BakeArtifacts:
                 n_box_fallbacks += 1
             continue
 
-        hulls, decomposed = _collision_hulls(tm, single_hull, prim.name)
+        hulls, decomposed = _collision_hulls(
+            tm,
+            single_hull,
+            prim.name,
+            component_vhacd=component_vhacd,
+        )
         if decomposed:
             n_decomposed += 1
 
@@ -245,11 +292,23 @@ def _bake_collision_hulls(prims: list[Any], cache_dir: Path) -> _BakeArtifacts:
         n_hulls=n_hulls,
         n_decomposed=n_decomposed,
         n_box_fallbacks=n_box_fallbacks,
+        n_visuals=n_visuals,
     )
 
 
-def _collision_hulls(tm: Any, single_hull: Any, prim_name: str) -> tuple[list[Any], bool]:
-    if float(single_hull.volume) <= _SHELL_VOLUME_M3:
+def _collision_hulls(
+    tm: Any,
+    single_hull: Any,
+    prim_name: str,
+    *,
+    component_vhacd: bool,
+) -> tuple[list[Any], bool]:
+    hull_volume = float(single_hull.volume)
+    component_count = _body_count(tm)
+    should_decompose = hull_volume > _SHELL_VOLUME_M3 or (
+        component_vhacd and component_count >= _VHACD_MIN_COMPONENTS
+    )
+    if not should_decompose:
         return [single_hull], False
     try:
         parts = tm.convex_decomposition(
@@ -259,7 +318,8 @@ def _collision_hulls(tm: Any, single_hull: Any, prim_name: str) -> tuple[list[An
         hulls = parts if isinstance(parts, list) else [parts]
         logger.info(
             f"  {prim_name}: VHACD decomposed "
-            f"({single_hull.volume:.1f} m³ shell -> {len(hulls)} sub-hulls)"
+            f"({hull_volume:.3g} m³ shell, {component_count} components -> "
+            f"{len(hulls)} sub-hulls)"
         )
         return hulls, True
     except Exception as e:
@@ -268,6 +328,13 @@ def _collision_hulls(tm: Any, single_hull: Any, prim_name: str) -> tuple[list[An
             "(large rooms may collide as a solid shell)"
         )
         return [single_hull], False
+
+
+def _body_count(tm: Any) -> int:
+    try:
+        return int(tm.body_count)
+    except Exception:
+        return 1
 
 
 def _valid_hull(v: np.ndarray, f: np.ndarray) -> bool:
@@ -348,6 +415,10 @@ def _fmt_vec(values: np.ndarray) -> str:
 
 
 def _write_hull_obj(obj_file: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
+    _write_mesh_obj(obj_file, vertices, faces)
+
+
+def _write_mesh_obj(obj_file: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
     o3d_mesh = o3d.geometry.TriangleMesh()
     o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices.astype(np.float64))
     o3d_mesh.triangles = o3d.utility.Vector3iVector(faces)

@@ -102,6 +102,7 @@ _scene_mesh_y_up = (
 _scene_mesh_rotation = _env_xyz("DIMOS_SCENE_MESH_ROTATION_ZYX_DEG", (0.0, 0.0, 0.0))
 _scene_mesh_translation = _env_xyz("DIMOS_SCENE_MESH_TRANSLATION", (0.0, 0.0, 0.0))
 _scene_mesh_collision = os.environ.get("DIMOS_SCENE_MESH_COLLISION", "1") not in {"", "0"}
+_scene_mesh_visual = _env_bool("DIMOS_SCENE_MESH_VISUAL", False)
 _enable_depth_cloud = os.environ.get("DIMOS_ENABLE_DEPTH_CLOUD", "0").lower() in {
     "1",
     "true",
@@ -127,6 +128,7 @@ if _scene_mesh_path and _scene_mesh_collision:
                     y_up=_scene_mesh_y_up,
                 ),
                 meshdir=_mjcf_meshdir,
+                include_visual_mesh=_scene_mesh_visual,
             )
         )
     except Exception as exc:
