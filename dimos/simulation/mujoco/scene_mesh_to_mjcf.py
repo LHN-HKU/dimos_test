@@ -326,6 +326,7 @@ def cli_main() -> None:
 
     if view:
         import mujoco.viewer  # type: ignore[import-untyped]
+        viewer: Any = mujoco.viewer
 
         # ``launch`` runs MuJoCo's interactive viewer with its own
         # internal physics loop.  Blocks until the user closes it.
@@ -334,7 +335,7 @@ def cli_main() -> None:
         # (group 3 = our scene collision hulls, group 1 = robot
         # visual mesh, group 0 = robot collision mesh).
         print("\nlaunching MuJoCo viewer (press Esc / close window to exit)")
-        mujoco.viewer.launch(model)
+        viewer.launch(model)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import open3d as o3d
+import open3d as o3d  # type: ignore[import-untyped]
 
 
 @dataclass
@@ -101,7 +101,7 @@ def _color_from_displaycolor(
     isn't authored with a value (Sketchfab USDZ exports typically declare
     the primvar but leave it empty — colors live on the bound material).
     """
-    from pxr import UsdGeom
+    from pxr import UsdGeom  # type: ignore[import-untyped]
 
     pv = UsdGeom.PrimvarsAPI(mesh.GetPrim()).GetPrimvar("displayColor")
     if not pv or not pv.HasValue():
@@ -144,7 +144,7 @@ def _color_from_material(
     Results are cached per material path so we don't re-walk the shader graph
     for every prim that shares a material.
     """
-    from pxr import UsdShade
+    from pxr import UsdShade  # type: ignore[import-untyped]
 
     mat_api = UsdShade.MaterialBindingAPI(prim)
     bound = mat_api.ComputeBoundMaterial()[0]
@@ -161,7 +161,7 @@ def _color_from_material(
 
 def _resolve_diffuse_color(material: Any) -> np.ndarray | None:
     """Pull a literal ``diffuseColor`` out of a UsdShade material's surface shader."""
-    from pxr import UsdShade
+    from pxr import UsdShade  # type: ignore[import-untyped]
 
     surface = material.ComputeSurfaceSource("")[0]
     if not surface:
@@ -193,7 +193,7 @@ def _load_usd_mesh(path: Path) -> o3d.geometry.TriangleMesh:
     exports without having to chase materials/textures.
     """
     try:
-        from pxr import Usd, UsdGeom
+        from pxr import Usd, UsdGeom  # type: ignore[import-untyped]
     except ImportError as e:
         raise ImportError("loading .usdz/.usd requires usd-core: `uv pip install usd-core`") from e
 
@@ -309,7 +309,7 @@ def load_scene_mesh(
         # single concatenated mesh — peak stays under ~1 GB.
         import trimesh
 
-        scene_or_mesh = trimesh.load(str(path))
+        scene_or_mesh: Any = trimesh.load(str(path))
         if isinstance(scene_or_mesh, trimesh.Trimesh):
             verts_world = np.asarray(scene_or_mesh.vertices, dtype=np.float64)
             faces_world = np.asarray(scene_or_mesh.faces, dtype=np.int64)
@@ -402,7 +402,7 @@ def _load_glb_prims(path: Path, alignment: SceneMeshAlignment) -> list[ScenePrim
     """
     import trimesh
 
-    loaded = trimesh.load(str(path))
+    loaded: Any = trimesh.load(str(path))
     R = _world_rotation(alignment)
     T = np.asarray(alignment.translation, dtype=np.float64)
     s = float(alignment.scale)
@@ -487,7 +487,7 @@ def load_scene_prims(
         ]
 
     try:
-        from pxr import Usd, UsdGeom
+        from pxr import Usd, UsdGeom  # type: ignore[import-untyped]
     except ImportError as e:
         raise ImportError("loading .usdz/.usd requires usd-core: `uv pip install usd-core`") from e
 
