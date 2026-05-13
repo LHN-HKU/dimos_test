@@ -49,6 +49,7 @@ from dimos.control.tasks.baseline_path_follower_task import (
     BaselinePathFollowerTaskConfig,
 )
 from dimos.control.tasks.feedforward_gain_compensator import FeedforwardGainConfig
+from dimos.control.tasks.lyapunov_path_controller import LyapunovPathControllerConfig
 from dimos.control.tasks.path_follower_task import (
     PathFollowerTask,
     PathFollowerTaskConfig,
@@ -61,6 +62,20 @@ from dimos.control.tasks.reactive_path_follower_task import (
     ReactivePathFollowerTask,
     ReactivePathFollowerTaskConfig,
 )
+
+# Lyapunov on hw spins on cornered paths because k_theta * sin(e_theta) directly
+# amplifies heading-estimate noise from /go2/odom. Default k_theta=1.5 saturated
+# wz on corner_90 (cte=234cm in the first hw run). 0.6 keeps convergence usable
+# while attenuating noise amplification.
+_LYAPUNOV_HW_KTHETA = 0.6
+
+# RPP on hw cuts corners at high speed because PurePursuit's adaptive lookahead
+# grows with speed (default max_lookahead=1.0). On a 90° corner with 2m legs the
+# lookahead point ends up past the corner on the second leg, giving a gentle
+# sweep instead of a sharp turn. wz peak was ~0.55 rad/s (no saturation) at all
+# speeds — the controller wasn't trying, the geometry told it not to. Capping
+# max_lookahead at 0.5 forces the controller to commit to the turn.
+_RPP_MAX_LOOKAHEAD = 0.5
 from dimos.control.tasks.velocity_tracking_pid import VelocityTrackingConfig
 from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
@@ -534,10 +549,21 @@ def run_rpp_sim(
     speed: float = 0.55,
     ff_config: FeedforwardGainConfig | None = None,
     task_name: str = "rpp_follower",
+    *,
+    max_lookahead: float | None = None,
+    ct_kp: float = 0.0,
+    ct_ki: float = 0.0,
+    ct_kd: float = 0.0,
 ) -> ExecutedTrajectory:
     """Regulated Pure Pursuit (PathFollowerTask: PurePursuit + adaptive
     lookahead + curvature-aware velocity profiler + cross-track PID) in sim.
+
+    ``max_lookahead`` defaults to ``_RPP_MAX_LOOKAHEAD`` (0.5m). Pass an
+    explicit value to override per-call (e.g., for a geometric tuning sweep).
+    ``ct_kp/ct_ki/ct_kd`` default to 0 (PID disabled); pass non-zero to
+    engage the cross-track PID with explicit gains.
     """
+    eff_lookahead = max_lookahead if max_lookahead is not None else _RPP_MAX_LOOKAHEAD
 
     def _make() -> PathFollowerTask:
         return PathFollowerTask(
@@ -545,9 +571,69 @@ def run_rpp_sim(
             config=PathFollowerTaskConfig(
                 joint_names=list(_base_joints),
                 max_linear_speed=speed,
+                max_lookahead=eff_lookahead,
+                ct_kp=ct_kp,
+                ct_ki=ct_ki,
+                ct_kd=ct_kd,
                 ff_config=ff_config,
             ),
             global_config=global_config,
+        )
+
+    return _run_path_follower_sim(_make, path, timeout_s, sample_rate_hz)
+
+
+def run_rpp_tuned_sim(
+    path: Path,
+    timeout_s: float = 60.0,
+    sample_rate_hz: float = GO2_TICK_RATE_HZ,
+    speed: float = 0.55,
+    ff_config: FeedforwardGainConfig | None = None,
+    task_name: str = "rpp_tuned_follower",
+) -> ExecutedTrajectory:
+    """RPP in sim with config from :func:`tuning.tune_rpp_for_path`.
+
+    Sim parity for :func:`run_rpp_tuned_hw` — useful for pre-flight on
+    a new path before burning robot time.
+    """
+    from dimos.utils.benchmarking.tuning import tune_rpp_for_path
+
+    cfg = tune_rpp_for_path(path, speed)
+    cfg.pop("_diagnostics", None)
+    return run_rpp_sim(
+        path,
+        timeout_s=timeout_s,
+        sample_rate_hz=sample_rate_hz,
+        speed=speed,
+        ff_config=ff_config,
+        task_name=task_name,
+        **cfg,
+    )
+
+
+def run_setpoint_sim(
+    path: Path,
+    timeout_s: float = 60.0,
+    sample_rate_hz: float = GO2_TICK_RATE_HZ,
+    speed: float = 0.55,
+    task_name: str = "setpoint_follower",
+) -> ExecutedTrajectory:
+    """Pose-PID setpoint controller (drives to ``path.poses[-1]``) in sim.
+
+    Uses :class:`SetpointControlTask` which wraps :class:`SetpointController`
+    as the same path-follower protocol the battery runner expects. ``speed``
+    becomes ``max_vx`` on the underlying controller.
+    """
+    from dimos.utils.benchmarking.setpoint_benchmark import (
+        SetpointControllerConfig,
+        SetpointControlTask,
+    )
+
+    def _make() -> SetpointControlTask:
+        return SetpointControlTask(
+            name=task_name,
+            setpoint_config=SetpointControllerConfig(max_vx=speed),
+            joint_names=list(_base_joints),
         )
 
     return _run_path_follower_sim(_make, path, timeout_s, sample_rate_hz)
@@ -624,6 +710,7 @@ def run_lyapunov_hw(
             name="lyapunov_hw_follower",
             config=ReactivePathFollowerTaskConfig(
                 joint_names=list(_base_joints),
+                controller=LyapunovPathControllerConfig(k_theta=_LYAPUNOV_HW_KTHETA),
                 pid_config=opts.pid_config,
                 ff_config=opts.ff_config,
             ),
@@ -660,11 +747,21 @@ def run_rpp_hw(
     opts: HwRunOptions | None = None,
     *,
     interactive: bool = True,
+    max_lookahead: float | None = None,
+    ct_kp: float = 0.0,
+    ct_ki: float = 0.0,
+    ct_kd: float = 0.0,
 ) -> tuple[Path, ExecutedTrajectory]:
     """Regulated Pure Pursuit (PathFollowerTask: PurePursuit + adaptive
     lookahead + curvature-aware velocity profiler + cross-track PID) on hw.
+
+    ``max_lookahead`` defaults to ``_RPP_MAX_LOOKAHEAD`` (0.5m); pass an
+    explicit value to override per-call (e.g. from
+    :func:`tuning.tune_rpp_for_path`). ``ct_kp/ct_ki/ct_kd`` default to 0
+    (PID disabled); pass non-zero to engage with explicit gains.
     """
     opts = opts or HwRunOptions()
+    eff_lookahead = max_lookahead if max_lookahead is not None else _RPP_MAX_LOOKAHEAD
 
     def _make() -> PathFollowerTask:
         return PathFollowerTask(
@@ -672,12 +769,73 @@ def run_rpp_hw(
             config=PathFollowerTaskConfig(
                 joint_names=list(_base_joints),
                 max_linear_speed=opts.speed,
+                max_lookahead=eff_lookahead,
+                ct_kp=ct_kp,
+                ct_ki=ct_ki,
+                ct_kd=ct_kd,
                 ff_config=opts.ff_config,
             ),
             global_config=global_config,
         )
 
     return _run_path_follower_hw(_make, path, opts, interactive=interactive, label="rpp")
+
+
+def run_rpp_tuned_hw(
+    path: Path,
+    opts: HwRunOptions | None = None,
+    *,
+    interactive: bool = True,
+) -> tuple[Path, ExecutedTrajectory]:
+    """RPP on hw with config from :func:`tuning.tune_rpp_for_path`.
+
+    Calls the tuner with ``(path, opts.speed)``, gets back ``max_lookahead``
+    and ``(ct_kp, ct_kd)``, then delegates to :func:`run_rpp_hw`. No
+    hand-tuned constants — the config falls out of path geometry + the
+    desired closed-loop bandwidth.
+    """
+    from dimos.utils.benchmarking.tuning import tune_rpp_for_path
+
+    opts = opts or HwRunOptions()
+    cfg = tune_rpp_for_path(path, opts.speed)
+    diag = cfg.pop("_diagnostics", {})
+    if diag.get("infeasible"):
+        # Surface this in logs — operator should know the geometric tuner says
+        # this (path, speed) pair is impossible. We still try (the run won't
+        # hurt anything; cte will just be high).
+        from dimos.utils.logging_config import setup_logger
+
+        setup_logger().warning(
+            f"run_rpp_tuned_hw: geometric tuner reports INFEASIBLE for path "
+            f"(R_curve={diag.get('R_curve_min', float('nan')):.3f}m, "
+            f"R_robot={diag.get('R_robot_min', float('nan')):.3f}m at v={opts.speed}m/s). "
+            f"Running anyway; expect large cte."
+        )
+    return run_rpp_hw(path, opts, interactive=interactive, **cfg)
+
+
+def run_setpoint_hw(
+    path: Path,
+    opts: HwRunOptions | None = None,
+    *,
+    interactive: bool = True,
+) -> tuple[Path, ExecutedTrajectory]:
+    """Pose-PID setpoint controller (drives to ``path.poses[-1]``) on hardware."""
+    from dimos.utils.benchmarking.setpoint_benchmark import (
+        SetpointControllerConfig,
+        SetpointControlTask,
+    )
+
+    opts = opts or HwRunOptions()
+
+    def _make() -> SetpointControlTask:
+        return SetpointControlTask(
+            name="setpoint_hw_follower",
+            setpoint_config=SetpointControllerConfig(max_vx=opts.speed),
+            joint_names=list(_base_joints),
+        )
+
+    return _run_path_follower_hw(_make, path, opts, interactive=interactive, label="setpoint")
 
 
 def run_mpc_hw(
@@ -720,4 +878,8 @@ __all__ = [
     "run_pure_pursuit_sim",
     "run_rpp_hw",
     "run_rpp_sim",
+    "run_rpp_tuned_hw",
+    "run_rpp_tuned_sim",
+    "run_setpoint_hw",
+    "run_setpoint_sim",
 ]

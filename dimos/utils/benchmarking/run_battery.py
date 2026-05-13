@@ -44,6 +44,10 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import subprocess
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dimos.msgs.nav_msgs.Path import Path as NavPath
 
 from dimos.control.tasks.feedforward_gain_compensator import FeedforwardGainConfig
 from dimos.control.tasks.velocity_tracking_pid import (
@@ -66,6 +70,9 @@ from dimos.utils.benchmarking.runner import (
     run_pure_pursuit_sim,
     run_rpp_hw,
     run_rpp_sim,
+    run_rpp_tuned_hw,
+    run_setpoint_hw,
+    run_setpoint_sim,
 )
 from dimos.utils.benchmarking.scoring import ExecutedTrajectory, score_run
 
@@ -93,28 +100,15 @@ GO2_FEEDFORWARD = FeedforwardGainConfig(K_vx=1.008, K_vy=1.008, K_wz=2.175)
 
 
 # Sim cohort matrix: each entry produces a callable (path, timeout) -> ExecutedTrajectory.
+# Slim 4 + 1 optional set: production anchor, the three FF controllers, and
+# pure_pursuit (no FF) kept as the FF-vs-no-FF demo.
 SIM_COHORTS: dict[str, Callable[[Path, float], ExecutedTrajectory]] = {
-    # Baseline P-controller cohorts (production LocalPlanner algorithm)
     "baseline_k0.5": lambda p, t: run_baseline_sim(p, timeout_s=t, k_angular=0.5),
-    "baseline_k1.0_tuned": lambda p, t: run_baseline_sim(p, timeout_s=t, k_angular=1.0),
-    "baseline_k0.5_pi": lambda p, t: run_baseline_sim(
-        p, timeout_s=t, k_angular=0.5, pid_config=SESSION3_VELOCITY_TRACKING
-    ),
-    "baseline_k0.5_ff": lambda p, t: run_baseline_sim(
-        p, timeout_s=t, k_angular=0.5, ff_config=GO2_FEEDFORWARD
-    ),
-    # Classic Pure Pursuit
     "pure_pursuit": lambda p, t: run_pure_pursuit_sim(p, timeout_s=t),
     "pure_pursuit_ff": lambda p, t: run_pure_pursuit_sim(p, timeout_s=t, ff_config=GO2_FEEDFORWARD),
-    # Regulated Pure Pursuit (existing PathFollowerTask: PP + adaptive lookahead +
-    # curvature speed reg + cross-track PID)
-    "rpp": lambda p, t: run_rpp_sim(p, timeout_s=t),
     "rpp_ff": lambda p, t: run_rpp_sim(p, timeout_s=t, ff_config=GO2_FEEDFORWARD),
-    # Lyapunov reactive
-    "lyapunov": lambda p, t: run_lyapunov_sim(p, timeout_s=t),
-    "lyapunov_pi": lambda p, t: run_lyapunov_sim(
-        p, timeout_s=t, pid_config=SESSION3_VELOCITY_TRACKING
-    ),
+    "lyapunov_ff": lambda p, t: run_lyapunov_sim(p, timeout_s=t, ff_config=GO2_FEEDFORWARD),
+    "setpoint": lambda p, t: run_setpoint_sim(p, timeout_s=t),
 }
 
 # Hw controller dispatch: maps `--controller` value to its runner factory.
@@ -123,7 +117,9 @@ HW_RUNNERS: dict[str, Callable] = {
     "lyapunov": run_lyapunov_hw,
     "pure_pursuit": run_pure_pursuit_hw,
     "rpp": run_rpp_hw,
+    "rpp_tuned": run_rpp_tuned_hw,
     "mpc": run_mpc_hw,
+    "setpoint": run_setpoint_hw,
 }
 
 
@@ -138,6 +134,7 @@ def _git_short_sha() -> str:
 
 
 def _run_sim(args: argparse.Namespace) -> None:
+    """Run the cohort matrix in-process, persist trajectories + scores, render."""
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
     sha = _git_short_sha()
@@ -173,18 +170,66 @@ def _run_sim(args: argparse.Namespace) -> None:
             )
             cohort_results[name] = asdict(score)
             executed_xy = [(t.pose.position.x, t.pose.position.y) for t in traj.ticks]
-            (cohort_dir / f"{name}.svg").write_text(trajectory_to_svg(path, executed_xy))
+            # Persist the executed trajectory next to the SVG so plots can be
+            # regenerated later via `--mode replot` without re-simulating.
+            (cohort_dir / f"{name}_traj.json").write_text(json.dumps(executed_xy))
             per_path_executed[name][cohort_name] = executed_xy
 
         all_results[cohort_name] = cohort_results
 
-    # Composite: one SVG per path with all cohorts overlaid.
+    # Persist scores BEFORE rendering so a render failure doesn't lose them.
+    summary_path = out / f"sim_baseline_{sha}.json"
+    summary_path.write_text(json.dumps(all_results, indent=2))
+
+    _render_sim_artifacts(
+        out, sha, battery, list(SIM_COHORTS.keys()), all_results, per_path_executed
+    )
+    print(f"\nWrote {summary_path}")
+    print(f"Wrote composite SVGs to {out}/composite/")
+    print(f"Open in browser: file://{out.resolve()}/index.html")
+
+    # Comparison table
+    print(f"\n{'=' * 90}\nHead-to-head: cte_rms (cm)\n{'=' * 90}")
+    cohort_names = list(SIM_COHORTS.keys())
+    print(f"{'path':<22}  " + "  ".join(f"{c:>20}" for c in cohort_names))
+    for path_name in battery:
+        row = [path_name]
+        for c in cohort_names:
+            r = all_results[c][path_name]
+            row.append(f"{r['cte_rms'] * 100:5.1f}cm/{r['time_to_complete']:5.1f}s")
+        print(f"{row[0]:<22}  " + "  ".join(f"{r:>20}" for r in row[1:]))
+
+
+def _render_sim_artifacts(
+    out: Path,
+    sha: str,
+    battery: dict[str, NavPath],
+    cohort_names: list[str],
+    all_results: dict[str, dict[str, dict]],
+    per_path_executed: dict[str, dict[str, list[tuple[float, float]]]],
+) -> None:
+    """Write per-cohort SVGs, composite SVGs, and index.html from in-memory data.
+
+    Pulled out of `_run_sim` so `_run_replot` can call the same logic with data
+    loaded from disk instead of from a fresh simulation.
+    """
+    # Per-cohort, per-path SVGs.
+    for cohort_name in cohort_names:
+        cohort_dir = out / cohort_name
+        cohort_dir.mkdir(parents=True, exist_ok=True)
+        for path_name, path in battery.items():
+            executed_xy = per_path_executed.get(path_name, {}).get(cohort_name)
+            if executed_xy is None:
+                continue
+            (cohort_dir / f"{path_name}.svg").write_text(trajectory_to_svg(path, executed_xy))
+
+    # Composite: one SVG per path with all available cohorts overlaid.
     composite_dir = out / "composite"
     composite_dir.mkdir(parents=True, exist_ok=True)
     for path_name, path in battery.items():
         svg = multi_trajectory_to_svg(
             path,
-            per_path_executed[path_name],
+            per_path_executed.get(path_name, {}),
             size_px=600,
             title=path_name,
         )
@@ -205,14 +250,19 @@ def _run_sim(args: argparse.Namespace) -> None:
         f"<h1>Sim baseline (commit {sha})</h1>",
         "<h2>Head-to-head: cte_rms (cm)</h2>",
         "<table><thead><tr><th>path</th>"
-        + "".join(f"<th>{c}</th>" for c in SIM_COHORTS)
+        + "".join(f"<th>{c}</th>" for c in cohort_names)
         + "</tr></thead><tbody>",
     ]
     for path_name in battery:
         html_parts.append(f"<tr><td>{path_name}</td>")
-        for c in SIM_COHORTS:
-            r = all_results[c][path_name]
-            html_parts.append(f"<td>{r['cte_rms'] * 100:.1f} / {r['time_to_complete']:.1f}s</td>")
+        for c in cohort_names:
+            r = (all_results.get(c) or {}).get(path_name) or {}
+            cte = r.get("cte_rms")
+            ttc = r.get("time_to_complete")
+            if cte is None or ttc is None:
+                html_parts.append("<td>-</td>")
+            else:
+                html_parts.append(f"<td>{cte * 100:.1f} / {ttc:.1f}s</td>")
         html_parts.append("</tr>")
     html_parts.append("</tbody></table>")
 
@@ -227,22 +277,69 @@ def _run_sim(args: argparse.Namespace) -> None:
 
     (out / "index.html").write_text("\n".join(html_parts))
 
-    summary_path = out / f"sim_baseline_{sha}.json"
-    summary_path.write_text(json.dumps(all_results, indent=2))
-    print(f"\nWrote {summary_path}")
-    print(f"Wrote composite SVGs to {out}/composite/")
-    print(f"Open in browser: file://{out.resolve()}/index.html")
 
-    # Comparison table
-    print(f"\n{'=' * 90}\nHead-to-head: cte_rms (cm)\n{'=' * 90}")
-    cohort_names = list(SIM_COHORTS.keys())
-    print(f"{'path':<22}  " + "  ".join(f"{c:>20}" for c in cohort_names))
-    for path_name in battery:
-        row = [path_name]
-        for c in cohort_names:
-            r = all_results[c][path_name]
-            row.append(f"{r['cte_rms'] * 100:5.1f}cm/{r['time_to_complete']:5.1f}s")
-        print(f"{row[0]:<22}  " + "  ".join(f"{r:>20}" for r in row[1:]))
+# --- Replot mode entry point ---
+
+
+def _run_replot(args: argparse.Namespace) -> None:
+    """Re-render every SVG and the index.html from existing on-disk data.
+
+    Reads `sim_baseline_<sha>.json` (most recent if multiple) and each
+    `<cohort>/<path>_traj.json` produced by a prior `--mode sim` run, and
+    regenerates trajectory_to_svg + multi_trajectory_to_svg + index.html.
+    No simulation, no scoring - typically completes in seconds.
+    """
+    out: Path = args.out
+    if not out.is_dir():
+        raise SystemExit(f"--out {out} does not exist; nothing to replot.")
+
+    # Pick the most recent sim_baseline_<sha>.json in the dir.
+    summaries = sorted(out.glob("sim_baseline_*.json"), key=lambda p: p.stat().st_mtime)
+    if not summaries:
+        raise SystemExit(f"No sim_baseline_*.json found in {out}. Run `--mode sim` first.")
+    summary_path = summaries[-1]
+    sha = summary_path.stem.removeprefix("sim_baseline_")
+    all_results = json.loads(summary_path.read_text())
+    print(f"Replotting from {summary_path}")
+
+    # Load executed trajectories from per-cohort traj.json files.
+    battery = default_battery()
+    cohort_names = list(all_results.keys())
+    per_path_executed: dict[str, dict[str, list[tuple[float, float]]]] = {
+        name: {} for name in battery
+    }
+    n_loaded = 0
+    n_missing = 0
+    for cohort_name in cohort_names:
+        cohort_dir = out / cohort_name
+        if not cohort_dir.is_dir():
+            n_missing += len(battery)
+            print(f"  [skip] {cohort_name}: dir missing")
+            continue
+        for path_name in battery:
+            traj_path = cohort_dir / f"{path_name}_traj.json"
+            if not traj_path.exists():
+                n_missing += 1
+                continue
+            try:
+                xy = json.loads(traj_path.read_text())
+                per_path_executed[path_name][cohort_name] = [(float(x), float(y)) for x, y in xy]
+                n_loaded += 1
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                print(f"  [skip] {cohort_name}/{path_name}: {type(e).__name__}: {e}")
+                n_missing += 1
+    print(f"Loaded {n_loaded} trajectories ({n_missing} missing/skipped)")
+
+    if n_loaded == 0:
+        raise SystemExit(
+            f"No traj.json files found under {out}/<cohort>/<path>_traj.json. "
+            "Older sim runs (before the replot feature) didn't persist trajectories - "
+            "you'll need to re-run `--mode sim` once to populate them."
+        )
+
+    _render_sim_artifacts(out, sha, battery, cohort_names, all_results, per_path_executed)
+    print(f"Re-rendered SVGs + index.html in {out}")
+    print(f"Open in browser: file://{out.resolve()}/index.html")
 
 
 # --- Hardware mode entry point ---
@@ -331,9 +428,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=["sim", "hw"],
+        choices=["sim", "hw", "replot"],
         default="sim",
-        help="Sim sweeps the full cohort matrix; hw runs one controller (default: sim).",
+        help=(
+            "sim: sweep the full cohort matrix; "
+            "hw: run one controller; "
+            "replot: regenerate SVGs + index.html from existing on-disk data "
+            "(no simulation). Default: sim."
+        ),
     )
     # Common
     parser.add_argument(
@@ -374,18 +476,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Mode-specific defaults
+    # Mode-specific defaults. replot shares sim's output dir since it
+    # operates on what sim produced.
     if args.out is None:
         args.out = Path(
-            "/tmp/benchmarking_baseline" if args.mode == "sim" else "/tmp/benchmarking_hw"
+            "/tmp/benchmarking_hw" if args.mode == "hw" else "/tmp/benchmarking_baseline"
         )
     if args.timeout is None:
         args.timeout = 60.0 if args.mode == "sim" else 30.0
 
     if args.mode == "sim":
         _run_sim(args)
-    else:
+    elif args.mode == "hw":
         _run_hw(args)
+    else:  # replot
+        _run_replot(args)
 
 
 if __name__ == "__main__":

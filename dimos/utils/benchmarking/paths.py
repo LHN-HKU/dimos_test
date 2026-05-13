@@ -22,10 +22,34 @@ from __future__ import annotations
 
 import math
 
+from dimos.memory2.vis.space.elements import Point, Polyline, Text
+from dimos.memory2.vis.space.space import Space
+from dimos.msgs.geometry_msgs.Point import Point as GeoPoint
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
+
+# Plot styling constants for the trajectory renderers below.
+_REF_COLOR = "#cccccc"  # reference path = light gray
+_EXE_COLOR = "#1f77b4"  # single-cohort executed path = blue
+_START_COLOR = "#2ecc71"  # green start marker
+_END_COLOR = "#e74c3c"  # red end marker
+_REF_WIDTH = 0.06
+_EXE_WIDTH = 0.03
+_MARKER_RADIUS = 0.06
+
+
+def _xy_to_path(executed_xy: list[tuple[float, float]]) -> Path:
+    """Wrap (x, y) tuples in a nav_msgs.Path so memory2 Polyline can render them."""
+    poses = [
+        PoseStamped(
+            position=Vector3(x, y, 0.0),
+            orientation=Quaternion.from_euler(Vector3(0.0, 0.0, 0.0)),
+        )
+        for x, y in executed_xy
+    ]
+    return Path(poses=poses)
 
 
 def _pose(x: float, y: float, yaw: float) -> PoseStamped:
@@ -168,11 +192,86 @@ def square(side: float = 2.0, step: float = 0.05) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def smooth_corner(
+    leg_length: float = 2.0,
+    angle_deg: float = 90.0,
+    arc_radius: float = 0.5,
+    step: float = 0.05,
+) -> Path:
+    """Two straight legs joined by a finite-radius arc — geometrically tunable.
+
+    Unlike :func:`single_corner` (sharp 90° point with effectively zero radius),
+    this path replaces the corner with an arc of radius ``arc_radius``. That
+    gives a well-defined minimum curvature, so geometric tuning methods
+    (lookahead = 2·R, etc.) can compute an actual answer instead of "infeasible".
+    """
+    angle = math.radians(angle_deg)
+    n_leg = round(leg_length / step)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+
+    xs: list[float] = [i * step for i in range(n_leg + 1)]
+    ys: list[float] = [0.0] * (n_leg + 1)
+
+    # Center of the arc: perpendicular to leg 1, at distance arc_radius
+    cx = xs[-1]
+    cy = ys[-1] + arc_radius  # arc center is to the left for a +90° turn
+    # Arc starts at (xs[-1], ys[-1]) heading +x (angle from center = -π/2)
+    # and ends heading at angle `angle_deg` (angle from center = -π/2 + angle)
+    n_arc = max(2, round(abs(angle) * arc_radius / step))
+    for i in range(1, n_arc + 1):
+        theta_offset = (angle * i / n_arc) - math.pi / 2
+        xs.append(cx + arc_radius * math.cos(theta_offset))
+        ys.append(cy + arc_radius * math.sin(theta_offset))
+
+    # Second leg: starts at end of arc, heads in direction `angle`
+    end_x, end_y = xs[-1], ys[-1]
+    for i in range(1, n_leg + 1):
+        d = i * step
+        xs.append(end_x + d * cos_a)
+        ys.append(end_y + d * sin_a)
+    return _path_from_xy(xs, ys)
+
+
+def sidestep_1m(distance: float = 1.0, n_points: int = 20) -> Path:
+    """End up ``distance`` m to the left of start, facing forward.
+
+    Path waypoints sit on a straight line from (0, 0) to (0, distance), all
+    with yaw=0. Path-followers will interpret this as a goal 90° to the
+    left — they typically rotate to face it, drive there, then rotate back
+    to yaw=0 for arrival. Tests off-axis-goal handling more than true
+    lateral velocity (Go2 has minimal native vy authority over WebRTC).
+    """
+    poses: list[PoseStamped] = []
+    for i in range(n_points + 1):
+        a = i / n_points
+        poses.append(_pose(0.0, a * distance, 0.0))
+    return Path(poses=poses)
+
+
+def short_battery() -> dict[str, Path]:
+    """3-path battery for the hardware setpoint benchmark.
+
+    Tighter than `default_battery()` — only enough to get a 6-controller
+    comparison done in 15-20 min of robot time. Exercises:
+      - ``straight_2m``: trivial forward driving (best-case test).
+      - ``corner_90``: in-path heading change (steering authority test).
+      - ``sidestep_1m``: off-axis goal (turn-then-drive test).
+    """
+    return {
+        "straight_2m": straight_line(length=2.0),
+        "corner_90": single_corner(leg_length=2.0, angle_deg=90.0),
+        "sidestep_1m": sidestep_1m(),
+    }
+
+
 def default_battery() -> dict[str, Path]:
     """All canonical paths used for the standard benchmark report."""
     return {
+        "straight_2m": straight_line(length=2.0),
         "straight_5m": straight_line(length=5.0),
         "corner_90": single_corner(leg_length=2.0, angle_deg=90.0),
+        "smooth_corner_R0.5": smooth_corner(leg_length=2.0, angle_deg=90.0, arc_radius=0.5),
+        "sidestep_1m": sidestep_1m(),
         "circle_R0.5": circle(radius=0.5),
         "circle_R1.0": circle(radius=1.0),
         "circle_R2.0": circle(radius=2.0),
@@ -187,87 +286,9 @@ def default_battery() -> dict[str, Path]:
 # ---------------------------------------------------------------------------
 
 
-def path_to_svg(path: Path, size_px: int = 400, margin_px: int = 20) -> str:
-    """Render a Path as an SVG polyline (for visual inspection)."""
-    if not path.poses:
-        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{size_px}" height="{size_px}"/>'
-
-    xs = [p.position.x for p in path.poses]
-    ys = [p.position.y for p in path.poses]
-    x_min, x_max = min(xs), max(xs)
-    y_min, y_max = min(ys), max(ys)
-
-    span_x = max(x_max - x_min, 1e-6)
-    span_y = max(y_max - y_min, 1e-6)
-    scale = (size_px - 2 * margin_px) / max(span_x, span_y)
-
-    def _xy(p: PoseStamped) -> tuple[float, float]:
-        # Flip y so +y points up in SVG coords.
-        sx = margin_px + (p.position.x - x_min) * scale
-        sy = size_px - (margin_px + (p.position.y - y_min) * scale)
-        return sx, sy
-
-    pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in (_xy(p) for p in path.poses))
-    start_x, start_y = _xy(path.poses[0])
-    end_x, end_y = _xy(path.poses[-1])
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size_px}" height="{size_px}">'
-        f'<rect width="100%" height="100%" fill="white"/>'
-        f'<polyline points="{pts}" stroke="black" fill="none" stroke-width="1.5"/>'
-        f'<circle cx="{start_x:.2f}" cy="{start_y:.2f}" r="4" fill="green"/>'
-        f'<circle cx="{end_x:.2f}" cy="{end_y:.2f}" r="4" fill="red"/>'
-        f"</svg>"
-    )
-
-
-def trajectory_to_svg(
-    reference: Path,
-    executed_xy: list[tuple[float, float]],
-    size_px: int = 500,
-    margin_px: int = 20,
-) -> str:
-    """Render a reference path (gray) overlaid with executed trajectory (blue)."""
-    if not reference.poses or not executed_xy:
-        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{size_px}" height="{size_px}"/>'
-
-    ref_xs = [p.position.x for p in reference.poses]
-    ref_ys = [p.position.y for p in reference.poses]
-    exe_xs = [x for x, _ in executed_xy]
-    exe_ys = [y for _, y in executed_xy]
-
-    x_min = min(min(ref_xs), min(exe_xs))
-    x_max = max(max(ref_xs), max(exe_xs))
-    y_min = min(min(ref_ys), min(exe_ys))
-    y_max = max(max(ref_ys), max(exe_ys))
-
-    span_x = max(x_max - x_min, 1e-6)
-    span_y = max(y_max - y_min, 1e-6)
-    scale = (size_px - 2 * margin_px) / max(span_x, span_y)
-
-    def _xy(x: float, y: float) -> tuple[float, float]:
-        sx = margin_px + (x - x_min) * scale
-        sy = size_px - (margin_px + (y - y_min) * scale)
-        return sx, sy
-
-    ref_pts = " ".join(
-        f"{x:.2f},{y:.2f}" for x, y in (_xy(p.position.x, p.position.y) for p in reference.poses)
-    )
-    exe_pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in (_xy(x, y) for x, y in executed_xy))
-    sx, sy = _xy(executed_xy[0][0], executed_xy[0][1])
-    ex, ey = _xy(executed_xy[-1][0], executed_xy[-1][1])
-
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size_px}" height="{size_px}">'
-        f'<rect width="100%" height="100%" fill="white"/>'
-        f'<polyline points="{ref_pts}" stroke="lightgray" fill="none" stroke-width="3"/>'
-        f'<polyline points="{exe_pts}" stroke="#1f77b4" fill="none" stroke-width="1.5"/>'
-        f'<circle cx="{sx:.2f}" cy="{sy:.2f}" r="4" fill="green"/>'
-        f'<circle cx="{ex:.2f}" cy="{ey:.2f}" r="4" fill="red"/>'
-        f"</svg>"
-    )
-
-
-_COHORT_COLORS = [
+# Cohort palette for multi_trajectory_to_svg overlays. 10 distinct colors so
+# the current cohort matrix (10 entries) doesn't have any color collisions.
+_COHORT_COLORS = (
     "#1f77b4",  # blue
     "#d62728",  # red
     "#2ca02c",  # green
@@ -276,7 +297,45 @@ _COHORT_COLORS = [
     "#17becf",  # cyan
     "#e377c2",  # pink
     "#8c564b",  # brown
-]
+    "#bcbd22",  # olive
+    "#000000",  # black
+)
+
+
+def path_to_svg(path: Path, size_px: int = 400, margin_px: int = 20) -> str:
+    """Render a Path as an SVG polyline via memory2.vis.space.
+
+    ``size_px`` / ``margin_px`` are kept for API compatibility but ignored;
+    Space picks its own dimensions from world-space content bounds.
+    """
+    if not path.poses:
+        return Space().to_svg()
+
+    sp = Space()
+    sp.add(Polyline(msg=path, color="#000000", width=_REF_WIDTH))
+    sp.add(Point(msg=path.poses[0], color=_START_COLOR, radius=_MARKER_RADIUS))
+    sp.add(Point(msg=path.poses[-1], color=_END_COLOR, radius=_MARKER_RADIUS))
+    return sp.to_svg(show_axes=True)
+
+
+def trajectory_to_svg(
+    reference: Path,
+    executed_xy: list[tuple[float, float]],
+    size_px: int = 500,
+    margin_px: int = 20,
+) -> str:
+    """Reference path (gray) + executed trajectory (blue), via memory2.vis.space."""
+    if not reference.poses or not executed_xy:
+        return Space().to_svg()
+
+    sp = Space()
+    sp.add(Polyline(msg=reference, color=_REF_COLOR, width=_REF_WIDTH))
+    sp.add(Polyline(msg=_xy_to_path(executed_xy), color=_EXE_COLOR, width=_EXE_WIDTH))
+    sx, sy = executed_xy[0]
+    ex, ey = executed_xy[-1]
+    sp.add(Point(msg=GeoPoint(sx, sy, 0.0), color=_START_COLOR, radius=_MARKER_RADIUS))
+    sp.add(Point(msg=GeoPoint(ex, ey, 0.0), color=_END_COLOR, radius=_MARKER_RADIUS))
+    return sp.to_svg(show_axes=True)
 
 
 def multi_trajectory_to_svg(
@@ -286,69 +345,65 @@ def multi_trajectory_to_svg(
     margin_px: int = 30,
     title: str | None = None,
 ) -> str:
-    """Render reference + multiple executed trajectories on one SVG with a legend."""
+    """Reference + multiple executed trajectories overlaid, via memory2.vis.space.
+
+    Each cohort gets a distinct color from ``_COHORT_COLORS`` (10 unique
+    entries; no collisions for the current cohort matrix). A small dot at
+    each cohort's start position helps disambiguate when overlapping lines
+    converge. The legend is emitted as ``Polyline`` stubs + ``Text`` labels
+    placed in world space below the plot bounds, so it sits inside the
+    auto-fit viewBox alongside the trajectories. Axes / grid / tick labels
+    are drawn by memory2's Space renderer (`show_axes=True`).
+    """
     if not reference.poses:
-        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{size_px}" height="{size_px}"/>'
+        return Space().to_svg()
 
-    ref_xs = [p.position.x for p in reference.poses]
-    ref_ys = [p.position.y for p in reference.poses]
-    all_xs = list(ref_xs)
-    all_ys = list(ref_ys)
+    sp = Space()
+    sp.add(Polyline(msg=reference, color=_REF_COLOR, width=_REF_WIDTH * 1.4))
+
+    # Establish bounds for legend placement (below the path) and title (above).
+    all_ys = [p.position.y for p in reference.poses]
+    all_xs = [p.position.x for p in reference.poses]
     for xy in cohorts.values():
-        all_xs.extend(x for x, _ in xy)
         all_ys.extend(y for _, y in xy)
+        all_xs.extend(x for x, _ in xy)
+    y_min = min(all_ys) if all_ys else 0.0
+    y_max = max(all_ys) if all_ys else 1.0
+    x_min = min(all_xs) if all_xs else 0.0
 
-    x_min, x_max = min(all_xs), max(all_xs)
-    y_min, y_max = min(all_ys), max(all_ys)
-    span_x = max(x_max - x_min, 1e-6)
-    span_y = max(y_max - y_min, 1e-6)
-    plot_h = size_px - 2 * margin_px - (20 + 18 * len(cohorts))  # leave room for legend
-    plot_w = size_px - 2 * margin_px
-    scale = min(plot_w / span_x, plot_h / span_y)
-
-    def _xy(x: float, y: float) -> tuple[float, float]:
-        sx = margin_px + (x - x_min) * scale
-        sy = margin_px + plot_h - (y - y_min) * scale
-        return sx, sy
-
-    parts: list[str] = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size_px}" height="{size_px}">',
-        '<rect width="100%" height="100%" fill="white"/>',
-    ]
     if title:
-        parts.append(
-            f'<text x="{size_px // 2}" y="20" font-family="monospace" font-size="13" '
-            f'text-anchor="middle" font-weight="bold">{title}</text>'
-        )
+        sp.add(Text(position=(x_min, y_max + 0.3, 0.0), text=title, font_size=14.0))
 
-    ref_pts = " ".join(
-        f"{x:.2f},{y:.2f}" for x, y in (_xy(p.position.x, p.position.y) for p in reference.poses)
-    )
-    parts.append(f'<polyline points="{ref_pts}" stroke="lightgray" fill="none" stroke-width="4"/>')
-
-    legend_y = margin_px + plot_h + 16
+    # Cohort polylines + start dots.
     for i, (name, xy) in enumerate(cohorts.items()):
         color = _COHORT_COLORS[i % len(_COHORT_COLORS)]
         if xy:
-            exe_pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in (_xy(x, y) for x, y in xy))
-            parts.append(
-                f'<polyline points="{exe_pts}" stroke="{color}" fill="none" stroke-width="1.5"/>'
+            sp.add(Polyline(msg=_xy_to_path(xy), color=color, width=_EXE_WIDTH))
+            sx, sy = xy[0]
+            sp.add(Point(msg=GeoPoint(sx, sy, 0.0), color=color, radius=_MARKER_RADIUS * 0.7))
+        # Legend row (world coords below the plot).
+        ly = y_min - 0.4 - i * 0.25
+        sp.add(
+            Polyline(
+                msg=Path(
+                    poses=[
+                        PoseStamped(
+                            position=Vector3(x_min, ly, 0.0),
+                            orientation=Quaternion.from_euler(Vector3(0, 0, 0)),
+                        ),
+                        PoseStamped(
+                            position=Vector3(x_min + 0.4, ly, 0.0),
+                            orientation=Quaternion.from_euler(Vector3(0, 0, 0)),
+                        ),
+                    ]
+                ),
+                color=color,
+                width=_EXE_WIDTH,
             )
-            sx, sy = _xy(xy[0][0], xy[0][1])
-            parts.append(f'<circle cx="{sx:.2f}" cy="{sy:.2f}" r="3" fill="{color}"/>')
-        # Legend row
-        ly = legend_y + i * 18
-        parts.append(
-            f'<line x1="{margin_px}" y1="{ly}" x2="{margin_px + 20}" y2="{ly}" '
-            f'stroke="{color}" stroke-width="2"/>'
         )
-        parts.append(
-            f'<text x="{margin_px + 26}" y="{ly + 4}" font-family="monospace" '
-            f'font-size="11">{name}</text>'
-        )
+        sp.add(Text(position=(x_min + 0.5, ly, 0.0), text=name, font_size=12.0, color=color))
 
-    parts.append("</svg>")
-    return "".join(parts)
+    return sp.to_svg(show_axes=True)
 
 
 __all__ = [
