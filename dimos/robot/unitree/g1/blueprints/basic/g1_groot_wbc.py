@@ -61,7 +61,7 @@ def _env_xyz(name: str, default: tuple[float, float, float]) -> tuple[float, flo
 
 
 def _command_center_blueprints() -> list[Blueprint]:
-    if os.environ.get("DIMOS_ENABLE_COMMAND_CENTER", "1") in {"", "0"}:
+    if not _env_bool("DIMOS_ENABLE_COMMAND_CENTER", True):
         return []
     try:
         from dimos.web.websocket_vis.websocket_vis_module import WebsocketVisModule

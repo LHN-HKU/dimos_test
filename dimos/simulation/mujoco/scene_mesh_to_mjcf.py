@@ -154,9 +154,13 @@ def _cache_key(
     alignment: SceneMeshAlignment,
     meshdir: Path,
 ) -> str:
+    def _file_signature(path: Path) -> str:
+        stat = path.stat()
+        return f"{path}:{stat.st_size}:{stat.st_mtime_ns}"
+
     h = hashlib.sha256()
-    h.update(scene_mesh_path.read_bytes())
-    h.update(robot_mjcf_path.read_bytes())
+    h.update(_file_signature(scene_mesh_path).encode())
+    h.update(_file_signature(robot_mjcf_path).encode())
     h.update(repr(sorted(asdict(alignment).items())).encode())
     h.update(str(meshdir).encode())
     return h.hexdigest()[:_CACHE_KEY_LEN]

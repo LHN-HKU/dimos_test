@@ -556,6 +556,8 @@ def load_scene_prims(
 
 __all__ = [
     "SceneMeshAlignment",
+    "ScenePrimMesh",
     "load_scene_mesh",
+    "load_scene_prims",
     "make_raycasting_scene",
 ]
