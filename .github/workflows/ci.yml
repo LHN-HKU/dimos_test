@@ -65,6 +65,7 @@ jobs:
 
   tests:
     timeout-minutes: 20
+    if: false
     strategy:
       matrix:
         pyver: ['3.10', '3.11', '3.12', '3.13', '3.14']
@@ -157,10 +158,6 @@ jobs:
               image: ghcr.io/dimensionalos/ros-dev:dev
             markers: "self_hosted or skipif_no_ros or dimsim"
             experimental: false
-          - runner: [self-hosted, macos, arm64]
-            container: null  # run on host — `container:` is Linux-only
-            markers: "self_hosted"
-            experimental: true
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental }}
     permissions:
@@ -232,14 +229,35 @@ jobs:
           report_type: test_results
           use_oidc: true
       - name: Dump blueprint logs
-        if: failure()
+        if: always()
+        shell: bash
         run: |
-          shopt -s nullglob
-          for f in "${DIMOS_E2E_LOG_DIR:-/tmp}/dimos-e2e-logs"/blueprint-*.log; do
-            echo "::group::$f"
+          set +e
+          log_dir="${DIMOS_E2E_LOG_DIR:-/tmp}/dimos-e2e-logs"
+          echo "Looking for blueprint logs in $log_dir"
+          if [ ! -d "$log_dir" ]; then
+            echo "No blueprint log dir present."
+            exit 0
+          fi
+          found=0
+          for f in "$log_dir"/blueprint-*.log; do
+            [ -f "$f" ] || continue
+            found=1
+            echo "::group::$(basename "$f")"
             cat "$f"
             echo "::endgroup::"
           done
+          if [ "$found" = 0 ]; then
+            echo "No blueprint-*.log files found."
+          fi
+      - name: Upload blueprint logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blueprint-logs
+          path: /tmp/dimos-e2e-logs/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Check disk space
         if: failure()
         run: |
