@@ -16,6 +16,7 @@ import pytest
 
 
 @pytest.mark.dimsim
+@pytest.mark.skipif_no_openai
 def test_walk_forward(lcm_spy, start_blueprint, human_input, dim_sim) -> None:
     start_blueprint(
         "run",

@@ -16,6 +16,7 @@ import pytest
 
 
 @pytest.mark.dimsim
+@pytest.mark.skipif_no_openai
 def test_go_to_the_bed(lcm_spy, start_blueprint, human_input, dim_sim, explore_house) -> None:
     start_blueprint(
         "run",

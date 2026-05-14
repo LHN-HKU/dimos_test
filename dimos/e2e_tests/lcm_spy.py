@@ -35,6 +35,8 @@ class LcmSpy(LCMService):
     _saved_topics_lock: threading.Lock
     _topic_listeners: dict[str, list[Callable[[bytes], None]]]
     _topic_listeners_lock: threading.Lock
+    _health_checks: list[Callable[[], None]]
+    _health_checks_lock: threading.Lock
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -45,6 +47,8 @@ class LcmSpy(LCMService):
         self._saved_topics_lock = threading.Lock()
         self._topic_listeners = {}
         self._topic_listeners_lock = threading.Lock()
+        self._health_checks = []
+        self._health_checks_lock = threading.Lock()
 
     def start(self) -> None:
         super().start()
@@ -89,6 +93,25 @@ class LcmSpy(LCMService):
         finally:
             self.unregister_topic_listener(topic, listener)
 
+    def register_health_check(self, check: Callable[[], None]) -> None:
+        """Register a callable polled during ``wait_until``; it should raise on failure.
+
+        Lets fixtures fail-fast when a supervised subprocess dies, instead of
+        the test blocking on a topic that can never arrive.
+        """
+        with self._health_checks_lock:
+            self._health_checks.append(check)
+
+    def unregister_health_check(self, check: Callable[[], None]) -> None:
+        with self._health_checks_lock:
+            self._health_checks.remove(check)
+
+    def _run_health_checks(self) -> None:
+        with self._health_checks_lock:
+            checks = list(self._health_checks)
+        for check in checks:
+            check()
+
     def wait_until(
         self,
         *,
@@ -99,9 +122,11 @@ class LcmSpy(LCMService):
     ) -> None:
         start_time = time.time()
         while time.time() - start_time < timeout:
+            self._run_health_checks()
             if condition():
                 return
             time.sleep(poll_interval)
+        self._run_health_checks()
         raise TimeoutError(error_message)
 
     def wait_for_saved_topic(self, topic: str, timeout: float = 30.0) -> None:

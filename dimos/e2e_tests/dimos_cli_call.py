@@ -60,6 +60,19 @@ class DimosCliCall:
             start_new_session=True,
         )
 
+    def check_alive(self) -> None:
+        """Raise if the dimos subprocess has exited.
+
+        Tests block waiting for LCM topics from the blueprint; without this
+        an early crash (missing API key, module init failure) just looks like
+        a 20-minute hang.
+        """
+        if self.process is None:
+            return
+        rc = self.process.poll()
+        if rc is not None:
+            raise RuntimeError(f"dimos blueprint subprocess exited early with code {rc}")
+
     def stop(self) -> None:
         if self.process is None:
             return
