@@ -231,6 +231,15 @@ jobs:
         with:
           report_type: test_results
           use_oidc: true
+      - name: Dump blueprint logs
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in "${DIMOS_E2E_LOG_DIR:-/tmp}/dimos-e2e-logs"/blueprint-*.log; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
       - name: Check disk space
         if: failure()
         run: |

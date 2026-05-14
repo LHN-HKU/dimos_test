@@ -13,9 +13,18 @@
 # limitations under the License.
 
 import os
+from pathlib import Path
 import signal
 import subprocess
+import sys
+import tempfile
 import time
+from typing import IO
+
+# Blueprint stdio is written under this directory; the CI workflow cats it
+# on failure since pytest's captured output is lost when --timeout-method=thread
+# forces os._exit().
+LOG_DIR = Path(os.environ.get("DIMOS_E2E_LOG_DIR", tempfile.gettempdir())) / "dimos-e2e-logs"
 
 
 class DimosCliCall:
@@ -23,9 +32,13 @@ class DimosCliCall:
     demo_args: list[str] | None = None
     mcp_port: int | None = None
     simulator: str = "mujoco"
+    log_path: Path | None
+    _log_file: IO[bytes] | None
 
     def __init__(self) -> None:
         self.process = None
+        self.log_path = None
+        self._log_file = None
 
     def start(self) -> None:
         if self.demo_args is None:
@@ -48,6 +61,19 @@ class DimosCliCall:
                 f"mcpclient.mcp_server_url=http://localhost:{self.mcp_port}/mcp",
             ]
 
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        fd, log_path_str = tempfile.mkstemp(prefix="blueprint-", suffix=".log", dir=str(LOG_DIR))
+        os.close(fd)
+        self.log_path = Path(log_path_str)
+        self._log_file = open(self.log_path, "wb")
+        # Print before spawn so the path is in the test log even if the test
+        # later os._exit()s on pytest-timeout.
+        print(f"[dimos blueprint] stdio -> {self.log_path}", file=sys.stderr, flush=True)
+
+        # Force unbuffered Python output in the subprocess so we get lines as
+        # they happen rather than at process exit.
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
         self.process = subprocess.Popen(
             [
                 "dimos",
@@ -57,6 +83,9 @@ class DimosCliCall:
                 *args,
                 *blueprint_overrides,
             ],
+            stdout=self._log_file,
+            stderr=subprocess.STDOUT,
+            env=env,
             start_new_session=True,
         )
 
@@ -71,7 +100,10 @@ class DimosCliCall:
             return
         rc = self.process.poll()
         if rc is not None:
-            raise RuntimeError(f"dimos blueprint subprocess exited early with code {rc}")
+            raise RuntimeError(
+                f"dimos blueprint subprocess exited early with code {rc}. "
+                f"See {self.log_path} for output."
+            )
 
     def stop(self) -> None:
         if self.process is None:
@@ -112,3 +144,31 @@ class DimosCliCall:
                     pass
                 self.process.wait()
             raise
+        finally:
+            self._dump_log()
+
+    def _dump_log(self) -> None:
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+            self._log_file = None
+        if self.log_path is None or not self.log_path.exists():
+            return
+        try:
+            content = self.log_path.read_text(errors="replace")
+        except OSError:
+            return
+        if not content.strip():
+            return
+        # Dump to stderr so pytest's "Captured stderr" includes it on failure.
+        # The on-disk copy at log_path remains for CI to cat after job timeout.
+        print(
+            f"\n--- dimos blueprint output ({self.log_path}) ---",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.stderr.write(content)
+        sys.stderr.write("\n--- end dimos blueprint output ---\n")
+        sys.stderr.flush()
