@@ -64,6 +64,8 @@ all_blueprints = {
     "mid360-fastlio-voxels-native": "dimos.hardware.sensors.lidar.fastlio2.fastlio_blueprints:mid360_fastlio_voxels_native",
     "openarm-mock-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints:openarm_mock_planner_coordinator",
     "openarm-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints:openarm_planner_coordinator",
+    "parrot-anafi-agentic": "dimos.robot.parrot.anafi.blueprints.agentic.parrot_anafi_agentic:parrot_anafi_agentic",
+    "parrot-anafi-basic": "dimos.robot.parrot.anafi.blueprints.basic.parrot_anafi_basic:parrot_anafi_basic",
     "teleop-phone": "dimos.teleop.phone.blueprints:teleop_phone",
     "teleop-phone-go2": "dimos.teleop.phone.blueprints:teleop_phone_go2",
     "teleop-phone-go2-fleet": "dimos.teleop.phone.blueprints:teleop_phone_go2_fleet",
@@ -115,6 +117,7 @@ all_blueprints = {
 
 
 all_modules = {
+    "anafi-connection-module": "dimos.robot.parrot.anafi.connection.AnafiConnectionModule",
     "arm-teleop-module": "dimos.teleop.quest.quest_extensions.ArmTeleopModule",
     "b-box-navigation-module": "dimos.navigation.bbox_navigation.BBoxNavigationModule",
     "b1-connection-module": "dimos.robot.unitree.b1.connection.B1ConnectionModule",
