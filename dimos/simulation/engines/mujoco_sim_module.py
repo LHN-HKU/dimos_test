@@ -28,21 +28,21 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 import mujoco
-import numpy as np
-import open3d as o3d  # type: ignore[import-untyped]
 from pydantic import Field
 import reactivex as rx
-from reactivex.disposable import Disposable
 from scipy.spatial.transform import Rotation as R
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import In, Out
+from dimos.core.stream import Out
 from dimos.hardware.sensors.camera.spec import DepthCameraConfig, DepthCameraHardware
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -51,15 +51,13 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Imu import Imu
-from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.msgs.std_msgs.Bool import Bool as DimosBool
 from dimos.simulation.engines.mujoco_engine import (
     CameraConfig,
+    CameraFrame,
     MujocoEngine,
 )
 from dimos.simulation.engines.mujoco_shm import (
-    CMD_MODE_PD_TAU,
     ManipShmWriter,
     shm_key_from_path,
 )
@@ -92,7 +90,7 @@ def _default_identity_transform() -> Transform:
 class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     """Configuration for the unified MuJoCo simulation module."""
 
-    address: str = ""
+    address: str | Path = ""
     headless: bool = False
     dof: int = 7
 
@@ -109,25 +107,43 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     enable_pointcloud: bool = False
     pointcloud_fps: float = 5.0
     camera_info_fps: float = 1.0
-    # Multi-camera lidar fusion.  When non-empty, each camera in the
-    # list is rendered as a depth image, back-projected to world-frame
-    # points via depth_image_to_point_cloud(), and the union is
-    # voxel-downsampled before being published on `pointcloud`.  This
-    # mirrors the legacy out-of-process mujoco_process.py behavior the
-    # Go2 sim has used since #862 — three 160°-FOV cameras stitched
-    # to a 360° scan so VoxelGridMapper's column-carving actually
-    # sees the same XY columns each frame and stops accumulating
-    # phantom obstacles behind a moving robot.  When empty the
-    # original single-camera path runs unchanged.
-    lidar_camera_names: list[str] = Field(default_factory=list)
-    lidar_camera_width: int = 640
-    lidar_camera_height: int = 360
-    lidar_voxel_size: float = 0.05
     # Inject menagerie/dimos-bundled mesh bytes (via
     # dimos.simulation.mujoco.model.get_assets) into MjModel.from_xml_string.
     # MJCFs that reference meshes by bare filename (G1 GR00T, Go2) need this;
     # self-contained MJCFs with on-disk meshes (xarm scene.xml) don't.
     inject_legacy_assets: bool = False
+    # MJCF sensor names used to publish IMU. The module probes these in
+    # order and uses the first that exists in the model; if none match
+    # IMU publishing stays silent. Default list covers the common
+    # humanoid pelvis-mounted naming conventions (menagerie + dimos
+    # bundled MJCFs); pass robot-specific names for other platforms.
+    imu_gyro_sensor_names: list[str] = Field(
+        default_factory=lambda: [
+            "imu-pelvis-angular-velocity",
+            "imu-torso-angular-velocity",
+            "gyro_pelvis",
+            "imu_gyro",
+        ]
+    )
+    imu_accel_sensor_names: list[str] = Field(
+        default_factory=lambda: [
+            "imu-pelvis-linear-acceleration",
+            "imu-torso-linear-acceleration",
+            "accelerometer_pelvis",
+            "imu_accel",
+        ]
+    )
+    # Engine execution mode:
+    #   "thread"     — engine runs on a dimos worker thread inside this
+    #                  Module (current default). Cameras supported.
+    #   "subprocess" — Module spawns ``python -m
+    #                  dimos.simulation.engines.mujoco_engine`` and proxies
+    #                  to it via SHM. Needed when a passive viewer is wanted
+    #                  (mujoco.viewer.launch_passive requires main thread,
+    #                  which a dimos worker can't provide on macOS).
+    #                  Cameras + image-stream Out ports are not supported
+    #                  in this mode — set enable_color/depth/pointcloud=False.
+    engine_mode: Literal["thread", "subprocess"] = "thread"
 
 
 class MujocoSimModule(
@@ -154,15 +170,13 @@ class MujocoSimModule(
     # joint at the root.  Published every step; consumers like the viser
     # viewer use this to translate the robot in world space.
     odom: Out[PoseStamped]
-    # Respawn signal.  Any True message here resets the engine to
-    # keyframe 0 (the home pose).  Wired from the dashboard "Respawn"
-    # button via WebsocketVisModule → /sim/respawn.
-    respawn_cmd: In[DimosBool]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._engine: MujocoEngine | None = None
         self._shm: ManipShmWriter | None = None
+        self._sim_hooks: Any | None = None  # WholeBodySimHooks; thread mode only
+        self._engine_proc: subprocess.Popen[Any] | None = None  # subprocess mode only
         self._gripper_idx: int | None = None
         self._gripper_ctrl_range: tuple[float, float] = (0.0, 1.0)
         self._gripper_joint_range: tuple[float, float] = (0.0, 1.0)
@@ -177,14 +191,6 @@ class MujocoSimModule(
         # Quaternion is read from the floating-base qpos[3:7] when the model
         # has a free joint at the root; None otherwise.
         self._imu_base_qpos_slice: slice | None = None
-
-        # Latched PD-with-feedforward command state.  GR00T-style adapters
-        # write kp/kd/q_target every tick; we apply them to MjData.ctrl in
-        # the pre-step hook as tau = kp*(q_t - q) + kd*(0 - dq) + tau_ff.
-        self._latest_pd_pos_target: np.ndarray | None = None
-        self._latest_pd_kp: np.ndarray | None = None
-        self._latest_pd_kd: np.ndarray | None = None
-        self._latest_pd_tau: np.ndarray | None = None
 
     @property
     def _camera_link(self) -> str:
@@ -228,7 +234,14 @@ class MujocoSimModule(
             raise RuntimeError("MujocoSimModule: config.address (MJCF path) is required")
 
         # SHM key — adapter derives the same key from the same MJCF path.
+        # Both engine_mode paths use it.
         shm_key = shm_key_from_path(self.config.address)
+
+        if self.config.engine_mode == "subprocess":
+            self._start_subprocess(shm_key)
+            return
+
+        # Thread mode is the default engine path.
         self._shm = ManipShmWriter(shm_key)
 
         # Build engine with SHM hooks installed.
@@ -243,13 +256,10 @@ class MujocoSimModule(
         # steps — typically 5-30 ms per camera), so registering a camera
         # nobody consumes burns the 500 Hz tick deadline for nothing.
         # Skip the primary camera entirely when none of color / depth /
-        # pointcloud is enabled.  Lidar cameras still register when
-        # `lidar_camera_names` is set.
+        # pointcloud is enabled.
         cameras: list[CameraConfig] = []
         primary_needed = (
-            self.config.enable_color
-            or self.config.enable_depth
-            or (self.config.enable_pointcloud and not self.config.lidar_camera_names)
+            self.config.enable_color or self.config.enable_depth or self.config.enable_pointcloud
         )
         if primary_needed:
             cameras.append(
@@ -260,42 +270,13 @@ class MujocoSimModule(
                     fps=float(self.config.fps),
                 )
             )
-        # Self-occlusion filter for the lidar cameras: only render the
-        # static scene mesh (group 3) and the floor (group 2 — see
-        # comment in g1_gear_wbc.xml) — hide the robot's own collision
-        # (group 0) and visual (group 1) meshes.  Without this the
-        # lidar back-projects the robot's hands / torso / arms from the
-        # 3 torso-mounted cameras' POVs into the global voxel map,
-        # leaving a robot-shaped halo of phantom obstacles that travels
-        # with the robot and blocks A* from finding any path out.
-        lidar_scene_option = mujoco.MjvOption()
-        # MjvOption.geomgroup is a 6-byte array; default is all visible.
-        lidar_scene_option.geomgroup[0] = 0  # robot collision meshes
-        lidar_scene_option.geomgroup[1] = 0  # robot visual meshes
-        lidar_scene_option.geomgroup[2] = 1  # floor (kept visible)
-        lidar_scene_option.geomgroup[3] = 1  # scene-mesh convex hulls
-        lidar_scene_option.geomgroup[4] = 0
-        lidar_scene_option.geomgroup[5] = 0
-
-        for lidar_name in self.config.lidar_camera_names:
-            if lidar_name == self.config.camera_name and primary_needed:
-                continue  # already registered as the RGBD camera
-            cameras.append(
-                CameraConfig(
-                    name=lidar_name,
-                    width=self.config.lidar_camera_width,
-                    height=self.config.lidar_camera_height,
-                    fps=float(self.config.pointcloud_fps),
-                    scene_option=lidar_scene_option,
-                )
-            )
 
         self._engine = MujocoEngine(
             config_path=Path(self.config.address),
             headless=self.config.headless,
             cameras=cameras,
-            on_before_step=self._apply_shm_commands,
-            on_after_step=self._publish_shm_state,
+            on_before_step=None,  # set after gripper detection below
+            on_after_step=None,
             assets=engine_assets,
         )
 
@@ -317,25 +298,15 @@ class MujocoSimModule(
                 joint_range=joint_range,
             )
 
-        # Resolve IMU sensors once.  Whole-body MJCFs declare gyro/accel
-        # under various names; we accept the menagerie and dimos-bundled
-        # variants.  Manipulator MJCFs typically have neither — we just
-        # leave the slices as None and skip IMU publishing for those.
+        # Resolve IMU sensors once. Names come from config so robot-
+        # specific blueprints (G1, H1, Optimus, …) can override; manipulator
+        # MJCFs typically have neither — we leave the slices as None and
+        # skip IMU publishing for those.
         self._imu_gyro_slice = _find_sensor_slice(
-            self._engine.model,
-            "imu-pelvis-angular-velocity",
-            "imu-torso-angular-velocity",
-            "gyro_pelvis",
-            "imu_gyro",
-            dim=3,
+            self._engine.model, *self.config.imu_gyro_sensor_names, dim=3
         )
         self._imu_accel_slice = _find_sensor_slice(
-            self._engine.model,
-            "imu-pelvis-linear-acceleration",
-            "imu-torso-linear-acceleration",
-            "accelerometer_pelvis",
-            "imu_accel",
-            dim=3,
+            self._engine.model, *self.config.imu_accel_sensor_names, dim=3
         )
         # Floating-base orientation is qpos[3:7] (w,x,y,z) when the root
         # joint is a free joint.  Detect by checking jnt_type[0].
@@ -345,6 +316,19 @@ class MujocoSimModule(
             self._imu_base_qpos_slice = slice(3, 7)
         else:
             self._imu_base_qpos_slice = None
+
+        # Wire SHM bridge hooks (shared with subprocess mode).
+        from dimos.simulation.engines.wholebody_sim_hooks import WholeBodySimHooks
+
+        self._sim_hooks = WholeBodySimHooks(
+            self._shm,
+            dof=dof,
+            gripper_idx=self._gripper_idx,
+            gripper_ctrl_range=self._gripper_ctrl_range,
+            gripper_joint_range=self._gripper_joint_range,
+        )
+        self._engine._on_before_step = self._sim_hooks.pre_step  # type: ignore[attr-defined]
+        self._engine._on_after_step = self._publish_shm_and_lcm  # type: ignore[attr-defined]
 
         # Start physics (sim thread spawned inside engine.connect()).
         if not self._engine.connect():
@@ -370,14 +354,8 @@ class MujocoSimModule(
             )
         )
 
-        # Optional pointcloud generation.  Two source modes:
-        #   * Multi-camera lidar fusion (`lidar_camera_names` set) — each
-        #     listed camera renders its own depth in the engine; we don't
-        #     need `enable_depth` on the primary RGBD camera at all.
-        #   * Single-camera fallback — back-projects the primary camera's
-        #     depth image, so `enable_depth=True` IS required there.
-        _has_pointcloud_source = self.config.enable_depth or bool(self.config.lidar_camera_names)
-        if self.config.enable_pointcloud and _has_pointcloud_source:
+        # Optional pointcloud generation: back-projects primary camera depth.
+        if self.config.enable_pointcloud and self.config.enable_depth:
             pc_interval = 1.0 / self.config.pointcloud_fps
             self.register_disposable(
                 rx.interval(pc_interval).subscribe(
@@ -385,14 +363,6 @@ class MujocoSimModule(
                     on_error=lambda e: logger.error("Pointcloud error", error=str(e)),
                 )
             )
-
-        # Respawn — dashboard publishes True on /sim/respawn to reset
-        # qpos/qvel to keyframe 0 without restarting the sim thread.
-        try:
-            unsub = self.respawn_cmd.subscribe(self._on_respawn)
-            self.register_disposable(Disposable(unsub))
-        except Exception as e:
-            logger.warning(f"MujocoSimModule: respawn_cmd subscribe failed: {e}")
 
         logger.info(
             "MujocoSimModule started",
@@ -402,6 +372,63 @@ class MujocoSimModule(
             shm_key=shm_key,
         )
 
+    def _start_subprocess(self, shm_key: str) -> None:
+        """Spawn ``mujoco_engine.engine_main`` as a child process.
+
+        macOS needs ``mjpython`` for ``viewer.launch_passive`` (it bridges
+        the Cocoa main-thread requirement); Linux runs fine under the
+        regular Python interpreter. Cameras + image-stream outputs are
+        not supported in this mode — frame transport would need an SHM
+        ring buffer that doesn't exist yet — so we refuse early to give
+        a clear error.
+        """
+        if self.config.enable_color or self.config.enable_depth or self.config.enable_pointcloud:
+            raise RuntimeError(
+                "MujocoSimModule(engine_mode='subprocess') does not support cameras "
+                "(no cross-process frame buffer yet). Set enable_color / enable_depth / "
+                "enable_pointcloud to False or use engine_mode='thread'."
+            )
+        if sys.platform == "darwin":
+            interp = shutil.which("mjpython") or shutil.which("python")
+        else:
+            interp = sys.executable
+        if interp is None:
+            raise RuntimeError(
+                "MujocoSimModule(engine_mode='subprocess'): no mjpython/python on PATH"
+            )
+
+        cmd = [
+            interp,
+            "-m",
+            "dimos.simulation.engines.mujoco_engine",
+            str(self.config.address),
+            shm_key,
+            str(self.config.dof),
+        ]
+        if not self.config.headless:
+            cmd.append("--view")
+        if not self.config.inject_legacy_assets:
+            cmd.append("--no-asset-inject")
+
+        self._engine_proc = subprocess.Popen(cmd)
+        time.sleep(0.2)
+        returncode = self._engine_proc.poll()
+        if returncode is not None:
+            self._engine_proc = None
+            raise RuntimeError(
+                "MujocoSimModule engine subprocess exited immediately "
+                f"(returncode={returncode}, address={self.config.address})"
+            )
+        logger.info(
+            "MujocoSimModule spawned engine subprocess",
+            pid=self._engine_proc.pid,
+            interp=interp,
+            address=self.config.address,
+            shm_key=shm_key,
+        )
+        # The dimos-side adapter polls SHM readiness; start() only catches
+        # immediate spawn failures here.
+
     @rpc
     def stop(self) -> None:
         self._stop_event.set()
@@ -410,6 +437,7 @@ class MujocoSimModule(
         self._publish_thread = None
 
         errors: list[tuple[str, BaseException]] = []
+        # Thread-mode engine teardown.
         if self._engine is not None:
             try:
                 self._engine.disconnect()
@@ -417,6 +445,23 @@ class MujocoSimModule(
             except Exception as exc:
                 logger.error("engine.disconnect() failed", error=str(exc))
                 errors.append(("engine.disconnect", exc))
+        # Subprocess-mode teardown — SIGTERM, escalate to SIGKILL after
+        # a grace period if the subprocess doesn't exit (SHM cleanup
+        # happens inside engine_main's finally block).
+        if self._engine_proc is not None and self._engine_proc.poll() is None:
+            try:
+                self._engine_proc.terminate()
+                self._engine_proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    f"engine subprocess pid={self._engine_proc.pid} didn't exit in 3 s; SIGKILL"
+                )
+                self._engine_proc.kill()
+            except Exception as exc:
+                logger.error("engine subprocess terminate raised", error=str(exc))
+                errors.append(("engine_proc.terminate", exc))
+            finally:
+                self._engine_proc = None
         if self._shm is not None:
             try:
                 self._shm.signal_stop()
@@ -426,6 +471,7 @@ class MujocoSimModule(
                 logger.error("SHM cleanup failed", error=str(exc))
                 errors.append(("shm.cleanup", exc))
 
+        self._sim_hooks = None
         self._camera_info_base = None
         super().stop()
 
@@ -433,102 +479,24 @@ class MujocoSimModule(
             op, err = errors[0]
             raise RuntimeError(f"MujocoSimModule.stop() failed during {op}: {err}") from err
 
-    def _apply_shm_commands(self, engine: MujocoEngine) -> None:
-        """Pre-step hook: pull command targets from SHM into the engine."""
-        shm = self._shm
-        if shm is None:
-            return
-        dof = self.config.dof
+    def _publish_shm_and_lcm(self, engine: MujocoEngine) -> None:
+        """Post-step hook: SHM writes (via WholeBodySimHooks) + LCM publishes.
 
-        pos_cmd = shm.read_position_command(dof)
-        if pos_cmd is not None:
-            if shm.read_command_mode() == CMD_MODE_PD_TAU:
-                # Latch position target for the per-step PD computation
-                # below; do NOT route through engine.write_joint_command
-                # (that would set position-mode and override our tau).
-                self._latest_pd_pos_target = pos_cmd
-            else:
-                engine.write_joint_command(JointState(position=pos_cmd.tolist()))
-
-        vel_cmd = shm.read_velocity_command(dof)
-        if vel_cmd is not None:
-            engine.write_joint_command(JointState(velocity=vel_cmd.tolist()))
-
-        kp_cmd = shm.read_kp_command(dof)
-        if kp_cmd is not None:
-            self._latest_pd_kp = kp_cmd
-        kd_cmd = shm.read_kd_command(dof)
-        if kd_cmd is not None:
-            self._latest_pd_kd = kd_cmd
-        tau_cmd = shm.read_tau_command(dof)
-        if tau_cmd is not None:
-            self._latest_pd_tau = tau_cmd
-
-        # Apply latched PD-tau if all four pieces have arrived at least once.
-        # Manipulator path (no kp/kd writes) skips this entirely.
-        if (
-            self._latest_pd_pos_target is not None
-            and self._latest_pd_kp is not None
-            and self._latest_pd_kd is not None
-        ):
-            q = np.asarray(engine.joint_positions[:dof], dtype=np.float64)
-            dq = np.asarray(engine.joint_velocities[:dof], dtype=np.float64)
-            tau_ff = self._latest_pd_tau if self._latest_pd_tau is not None else np.zeros(dof)
-            tau = (
-                self._latest_pd_kp * (self._latest_pd_pos_target - q)
-                + self._latest_pd_kd * (-dq)
-                + tau_ff
-            )
-            engine.write_joint_command(JointState(effort=tau.tolist()))
-
-        if self._gripper_idx is not None:
-            gripper_cmd = shm.read_gripper_command()
-            if gripper_cmd is not None:
-                ctrl_value = self._gripper_joint_to_ctrl(gripper_cmd)
-                engine.set_position_target(self._gripper_idx, ctrl_value)
-
-    def _on_respawn(self, msg: DimosBool) -> None:
-        """Respawn callback — reset engine to keyframe 0 on True.
-
-        Also clears the latched PD command state so we don't immediately
-        steer back toward the pre-reset target.  Idempotent: a False
-        message is a no-op.
+        Subprocess-mode engines run the SHM half in their own process; the
+        LCM half there too (see ``mujoco_engine.engine_main``). This thread-
+        mode version stays here so existing in-Module behaviour is identical.
         """
-        if not getattr(msg, "data", False):
-            return
-        engine = self._engine
-        if engine is None:
-            logger.warning("respawn requested but engine is not running")
-            return
-        logger.info("Respawn — resetting MuJoCo to keyframe 0")
-        engine.reset()
-        # Drop any latched PD targets from before the reset; the next
-        # adapter tick will write fresh values.
-        self._latest_pd_pos_target = None
-        self._latest_pd_kp = None
-        self._latest_pd_kd = None
-        self._latest_pd_tau = None
-
-    def _publish_shm_state(self, engine: MujocoEngine) -> None:
-        """Post-step hook: publish joint state + IMU to SHM."""
+        if self._sim_hooks is not None:
+            self._sim_hooks.post_step(engine)
         shm = self._shm
         if shm is None:
             return
-        shm.write_joint_state(
-            positions=engine.joint_positions,
-            velocities=engine.joint_velocities,
-            efforts=engine.joint_efforts,
-        )
-        if self._gripper_idx is not None:
-            positions = engine.joint_positions
-            if self._gripper_idx < len(positions):
-                shm.write_gripper_state(positions[self._gripper_idx])
 
         # Odom — when the MJCF has a free-joint root, publish base pose
         # from qpos[0:7] every step.  Without this, downstream consumers
         # (viser viewer, nav stack) only see joint articulation, not
         # base translation through the world.
-        data = engine._data  # type: ignore[attr-defined]  # in-process, same MjData
+        data = engine.data  # in-process: same MjData the sim thread mutates
         if self._imu_base_qpos_slice is not None:
             base_pos = data.qpos[0:3]
             base_quat = data.qpos[3:7]  # (w, x, y, z) per MuJoCo convention
@@ -579,16 +547,6 @@ class MujocoSimModule(
                 linear_acceleration=Vector3(accel[0], accel[1], accel[2]),
             )
         )
-
-    def _gripper_joint_to_ctrl(self, joint_position: float) -> float:
-        """Map joint-space gripper position to actuator control value."""
-        jlo, jhi = self._gripper_joint_range
-        clo, chi = self._gripper_ctrl_range
-        clamped = max(jlo, min(jhi, joint_position))
-        if jhi == jlo:
-            return clo
-        t = (clamped - jlo) / (jhi - jlo)
-        return chi - t * (chi - clo)
 
     def _build_camera_info(self) -> None:
         if self._engine is None:
@@ -669,7 +627,7 @@ class MujocoSimModule(
                 )
                 self.depth_image.publish(depth_img)
 
-            self._publish_tf(ts, frame.cam_pos, frame.cam_mat)
+            self._publish_tf(ts, frame)
 
             published_count += 1
             if published_count == 1:
@@ -702,14 +660,16 @@ class MujocoSimModule(
         self.camera_info.publish(info)
         self.depth_camera_info.publish(info)
 
-    def _publish_tf(self, ts: float, cam_pos: np.ndarray, cam_mat: np.ndarray) -> None:
-        mj_rot = R.from_matrix(cam_mat.reshape(3, 3))
+    def _publish_tf(self, ts: float, frame: CameraFrame | None) -> None:
+        if frame is None:
+            return
+        mj_rot = R.from_matrix(frame.cam_mat.reshape(3, 3))
         optical_rot = mj_rot * _RX180
         q = optical_rot.as_quat()  # xyzw
         pos = Vector3(
-            float(cam_pos[0]),
-            float(cam_pos[1]),
-            float(cam_pos[2]),
+            float(frame.cam_pos[0]),
+            float(frame.cam_pos[1]),
+            float(frame.cam_pos[2]),
         )
         rot = Quaternion(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
         self.tf.publish(
@@ -734,79 +694,12 @@ class MujocoSimModule(
                 child_frame_id=self._camera_link,
                 ts=ts,
             ),
-            # Alias for Detection3DModule's hardcoded "camera_optical"
-            # target frame (perception/detection/module3D.py:181).  Same
-            # pose as color_optical; lets the lidar-driven object DB do
-            # tf.get("camera_optical", "world", ts) without code changes.
-            Transform(
-                translation=pos,
-                rotation=rot,
-                frame_id="world",
-                child_frame_id="camera_optical",
-                ts=ts,
-            ),
         )
 
     def _generate_pointcloud(self) -> None:
         if self._engine is None:
             return
-        # Multi-camera lidar fusion: render every named lidar camera,
-        # back-project each depth image into world frame, concatenate,
-        # and voxel-downsample.  The result is a single 360° point cloud
-        # with `frame_id="world"`, which is what VoxelGridMapper expects
-        # ("Assumes input clouds are already in world frame.").  This
-        # matches the legacy mujoco_process.py behavior the Go2 sim has
-        # always used.
-        if self.config.lidar_camera_names:
-            try:
-                from dimos.simulation.mujoco.depth_camera import depth_image_to_point_cloud
-
-                all_points: list[np.ndarray] = []
-                latest_ts: float = 0.0
-                for cam_name in self.config.lidar_camera_names:
-                    frame = self._engine.read_camera(cam_name)
-                    if frame is None:
-                        continue
-                    # ``mj_data.cam_xmat`` is stored flat; the helper wants
-                    # a 3x3.  Don't .copy() — the engine already gave us a
-                    # snapshot, just view it as the right shape.
-                    cam_mat3 = np.asarray(frame.cam_mat, dtype=np.float64).reshape(3, 3)
-                    pts = depth_image_to_point_cloud(
-                        frame.depth,
-                        frame.cam_pos,
-                        cam_mat3,
-                        fov_degrees=frame.fovy,
-                    )
-                    if pts.size > 0:
-                        all_points.append(pts)
-                    latest_ts = max(latest_ts, frame.timestamp)
-                if not all_points:
-                    return
-                combined = np.vstack(all_points)
-                pcd_o3d = o3d.geometry.PointCloud()
-                pcd_o3d.points = o3d.utility.Vector3dVector(combined)
-                pcd_o3d = pcd_o3d.voxel_down_sample(self.config.lidar_voxel_size)
-                self.pointcloud.publish(
-                    PointCloud2(pointcloud=pcd_o3d, ts=latest_ts or time.time(), frame_id="world")
-                )
-                # Publish head-camera TF here so consumers (ObjectDBModule,
-                # MeshCameraModule's TF lookups, etc.) see the optical
-                # frame even when ``enable_color`` / ``enable_depth`` are
-                # off and the camera-publish loop never registers
-                # head_color as a renderer.  Pose comes from MjData
-                # directly — populated every physics step regardless of
-                # rendering, so no GPU work added.
-                pose = self._engine.get_camera_pose(self.config.camera_name)
-                if pose is not None:
-                    cam_pos, cam_mat = pose
-                    self._publish_tf(latest_ts or time.time(), cam_pos, cam_mat)
-            except Exception as exc:
-                logger.error("Multi-camera lidar fusion error", error=str(exc))
-            return
-
-        # Single-camera fallback: produce a camera-frame pointcloud from
-        # the primary RGBD camera.  Kept for manipulation-style sims that
-        # want a head-camera depth feed instead of a 360° lidar.
+        # Back-project the primary camera's depth image.
         if self._camera_info_base is None:
             return
         frame = self._engine.read_camera(self.config.camera_name)

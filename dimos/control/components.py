@@ -16,6 +16,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from dimos.hardware.whole_body.spec import WholeBodyConfig
@@ -80,7 +81,7 @@ class HardwareComponent:
     hardware_type: HardwareType
     joints: list[JointName] = field(default_factory=list)
     adapter_type: str = "mock"
-    address: str | None = None
+    address: str | Path | None = None
     auto_enable: bool = True
     gripper_joints: list[JointName] = field(default_factory=list)
     domain_id: int = 0

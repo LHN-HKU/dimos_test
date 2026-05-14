@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
+import time
+from typing import Any
 
 from dimos.control.task import (
     BaseControlTask,
@@ -226,6 +228,11 @@ class JointServoTask(BaseControlTask):
         """Activate the task (start accepting and outputting commands)."""
         with self._lock:
             self._active = True
+            # Refresh the timeout reference so a caller that re-starts
+            # the task after a long idle window (or uses default_positions
+            # with a non-zero timeout) doesn't time out on the first tick
+            # from the stale 0.0 left at construction.
+            self._last_update_time = time.perf_counter()
         logger.info(f"JointServoTask {self._name} started")
 
     def stop(self) -> None:
@@ -251,3 +258,15 @@ __all__ = [
     "JointServoTask",
     "JointServoTaskConfig",
 ]
+
+
+def create_task(cfg: Any, hardware: Any) -> JointServoTask:
+    kwargs: dict[str, object] = {
+        "joint_names": cfg.joint_names,
+        "priority": cfg.priority,
+    }
+    if cfg.default_positions is not None:
+        kwargs["default_positions"] = cfg.default_positions
+        # Zero timeout pairs naturally with default-hold.
+        kwargs["timeout"] = 0.0
+    return JointServoTask(cfg.name, JointServoTaskConfig(**kwargs))  # type: ignore[arg-type]

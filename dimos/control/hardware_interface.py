@@ -14,11 +14,12 @@
 
 """Connected hardware for the ControlCoordinator.
 
-Provides two wrapper types:
+Provides runtime wrappers for coordinator-managed hardware:
 - ConnectedHardware: Wraps ManipulatorAdapter for joint-controlled arms
 - ConnectedTwistBase: Wraps TwistBaseAdapter for velocity-commanded platforms
+- ConnectedWholeBody: Wraps WholeBodyAdapter for full-body motor control
 
-Both share the same duck-type interface (read_state, write_command, etc.)
+They share the same duck-type interface (read_state, write_command, etc.)
 so the tick loop treats them uniformly.
 """
 

@@ -24,7 +24,7 @@ from pathlib import Path
 import sys
 import time
 import types
-from typing import TYPE_CHECKING, Any, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Union, cast, get_args, get_origin
 
 import click
 from dotenv import load_dotenv
@@ -38,6 +38,7 @@ from dimos.constants import CONFIG_DIR, LOG_DIR
 from dimos.core.daemon import daemonize, install_signal_handlers
 from dimos.core.global_config import GlobalConfig, global_config
 from dimos.core.run_registry import get_most_recent, is_pid_alive, stop_entry
+from dimos.robot.unitree.go2.cli.go2tool import app as go2tool_app
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
@@ -117,6 +118,14 @@ def create_dynamic_callback():  # type: ignore[no-untyped-def]
 
 
 main.callback()(create_dynamic_callback())  # type: ignore[no-untyped-call]
+main.add_typer(go2tool_app, name="go2tool")
+
+
+def _format_arg_default(value: Any) -> str:
+    with suppress(AttributeError):
+        filename = object.__getattribute__(value, "_lfs_filename")
+        return f"LfsPath({filename})"
+    return str(value)
 
 
 def arg_help(
@@ -153,7 +162,7 @@ def arg_help(
             display_type = t.__name__ if isinstance(t, type) else t
             required = "[Required] " if info.is_required() and k not in _atom.kwargs else ""
             d = _atom.kwargs.get(k, info.default)
-            default = f" (default: {d})" if d is not PydanticUndefined else ""
+            default = f" (default: {_format_arg_default(d)})" if d is not PydanticUndefined else ""
             output += f"{indent}* {required}{module}{k}: {display_type}{default}\n"
     return output
 
@@ -221,6 +230,10 @@ def run(
     setup_exception_handler()
 
     cli_config_overrides: dict[str, Any] = ctx.obj
+
+    # Apply CLI config before importing blueprints that branch on global_config.
+    if cli_config_overrides:
+        global_config.update(**cli_config_overrides)
 
     # Clean stale registry entries
     stale = cleanup_stale()
@@ -660,17 +673,22 @@ def send(
 
 @main.command(name="rerun-bridge")
 def rerun_bridge_cmd(
-    viewer_mode: str = typer.Option(
-        "native", help="Viewer mode: native (desktop), web (browser), none (headless)"
-    ),
     memory_limit: str = typer.Option(
         "25%", help="Memory limit for Rerun viewer (e.g., '4GB', '16GB', '25%')"
+    ),
+    rerun_open: str = typer.Option("native", help="How to open Rerun: native, web, both, none"),
+    rerun_web: bool = typer.Option(
+        True, "--rerun-web/--no-rerun-web", help="Enable/Disable Rerun web server"
     ),
 ) -> None:
     """Launch the Rerun visualization bridge."""
     from dimos.visualization.rerun.bridge import run_bridge
 
-    run_bridge(viewer_mode=viewer_mode, memory_limit=memory_limit)
+    run_bridge(
+        memory_limit=memory_limit,
+        rerun_open=cast("RerunOpenOption", rerun_open),
+        rerun_web=rerun_web,
+    )
 
 
 if __name__ == "__main__":

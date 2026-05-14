@@ -261,7 +261,7 @@ class ManipShmWriter:
     def read_command_mode(self) -> int:
         return int(self._control()[CTRL_COMMAND_MODE])
 
-    # --- Whole-body additions ---
+    # Whole-body additions
 
     def write_imu(
         self,
@@ -390,7 +390,7 @@ class ManipShmReader:
         arr[1] = position
         self._increment_seq(SEQ_GRIPPER_CMD)
 
-    # --- Whole-body additions ---
+    # Whole-body additions
 
     def read_imu(
         self,
@@ -429,6 +429,37 @@ class ManipShmReader:
         arr[:n] = tau[:n]
         self._set_command_mode(CMD_MODE_PD_TAU)
         self._increment_seq(SEQ_TAU_CMD)
+
+    def write_pd_tau_command(
+        self,
+        positions: list[float],
+        kp: list[float],
+        kd: list[float],
+        tau: list[float],
+    ) -> None:
+        """Write a whole-body PD+tau command without transient mode flips.
+
+        The sim engine runs in a different process, so setting position mode
+        first and PD mode later creates a small but real race. Write all arrays,
+        publish PD mode once, then bump the sequence counters.
+        """
+        n_pos = min(len(positions), MAX_JOINTS)
+        n_kp = min(len(kp), MAX_JOINTS)
+        n_kd = min(len(kd), MAX_JOINTS)
+        n_tau = min(len(tau), MAX_JOINTS)
+        np.ndarray((MAX_JOINTS,), dtype=np.float64, buffer=self.shm.pos_t.buf)[:n_pos] = positions[
+            :n_pos
+        ]
+        np.ndarray((MAX_JOINTS,), dtype=np.float64, buffer=self.shm.kp_t.buf)[:n_kp] = kp[:n_kp]
+        np.ndarray((MAX_JOINTS,), dtype=np.float64, buffer=self.shm.kd_t.buf)[:n_kd] = kd[:n_kd]
+        np.ndarray((MAX_JOINTS,), dtype=np.float64, buffer=self.shm.tau_t.buf)[:n_tau] = tau[:n_tau]
+        self._set_command_mode(CMD_MODE_PD_TAU)
+        self._increment_seq(SEQ_KP_CMD)
+        self._increment_seq(SEQ_KD_CMD)
+        self._increment_seq(SEQ_TAU_CMD)
+        # Position is the engine-side trigger for latching a new PD target,
+        # so publish it last after gains/torque are visible.
+        self._increment_seq(SEQ_POSITION_CMD)
 
     def is_ready(self) -> bool:
         return bool(self._control()[CTRL_READY] == 1)

@@ -28,19 +28,11 @@ import time
 from typing import Any
 import webbrowser
 
-import cv2
 from dimos_lcm.std_msgs import Bool
-import numpy as np
 from reactivex.disposable import Disposable
 import socketio  # type: ignore[import-untyped]
 from starlette.applications import Starlette
-from starlette.responses import (
-    FileResponse,
-    JSONResponse,
-    RedirectResponse,
-    Response,
-    StreamingResponse,
-)
+from starlette.responses import FileResponse, RedirectResponse, Response
 from starlette.routing import Route
 import uvicorn
 
@@ -67,8 +59,6 @@ from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.msgs.sensor_msgs.Image import Image
-from dimos.msgs.std_msgs.Bool import Bool as DimosBool
 from dimos.utils.logging_config import setup_logger
 
 from .optimized_costmap import OptimizedCostmapEncoder
@@ -81,11 +71,6 @@ _browser_opened = False
 
 class WebsocketConfig(ModuleConfig):
     port: int = 7779
-    # MJPEG stream tuning. JPEG quality is the encoder param (0-100);
-    # frame_rate caps the camera_stream emit rate so a high-fps source
-    # can't saturate the websocket / browser decoder.
-    camera_jpeg_quality: int = 70
-    camera_max_fps: float = 15.0
 
 
 class WebsocketVisModule(Module):
@@ -114,25 +99,15 @@ class WebsocketVisModule(Module):
     gps_location: In[LatLon]
     path: In[Path]
     global_costmap: In[OccupancyGrid]
-    color_image: In[Image]
 
     # LCM outputs
     goal_request: Out[PoseStamped]
     gps_goal: Out[LatLon]
     explore_cmd: Out[Bool]
     stop_explore_cmd: Out[Bool]
-    cmd_vel: Out[Twist]
+    tele_cmd_vel: Out[Twist]
     movecmd_stamped: Out[TwistStamped]
-    # Arming / dry-run for locomotion-policy tasks (e.g. GrootWBCTask).
-    # Uses dimos.msgs.std_msgs.Bool to match the coordinator's
-    # ``activate`` / ``dry_run`` In[Bool] ports, rather than
-    # dimos_lcm.std_msgs.Bool used by ``explore_cmd`` — the LCM wire
-    # format is identical; what matters for autoconnect is type parity.
-    activate: Out[DimosBool]
-    dry_run: Out[DimosBool]
-    # Respawn — dashboard "Respawn" button publishes True here, picked
-    # up by MujocoSimModule.respawn_cmd to snap the sim to keyframe 0.
-    respawn_cmd: Out[DimosBool]
+    # Arm/disarm/dry-run are one-shot coordinator RPCs, not output streams.
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize the WebSocket visualization module.
@@ -156,17 +131,31 @@ class WebsocketVisModule(Module):
         # Track GPS goal points for visualization
         self.gps_goal_points: list[dict[str, float]] = []
 
-        # Latest camera frame as JPEG bytes (or None if no frame yet).
-        # Single mutable holder + lock; the MJPEG endpoint pulls the most
-        # recent encoded frame on each iteration.
-        self._latest_jpeg: bytes | None = None
-        self._latest_jpeg_lock = threading.Lock()
-        self._frame_available = threading.Event()
-        self._last_encode_time: float = 0.0
+        # Lazy-initialised RPC client to ControlCoordinator. Used by the
+        # dashboard's arm/disarm/set_dry_run buttons which call the
+        # coordinator's @rpc set_activated / set_dry_run directly (no
+        # stream round-trip — arming is one-shot).
+        self._coordinator_client: Any | None = None
 
         logger.info(
             f"WebSocket visualization module initialized on port {self.config.port}, GPS goal tracking enabled"
         )
+
+    def _get_coordinator_client(self) -> Any | None:
+        """Lazy-init RPC client to ControlCoordinator. Returns None and
+        warns once if the coordinator isn't reachable (e.g. ws_vis is
+        being used in a blueprint that has no coordinator). Mirrors the
+        pattern in ``G1ManipulationModule._get_coordinator_client``."""
+        if self._coordinator_client is None:
+            try:
+                from dimos.control.coordinator import ControlCoordinator
+                from dimos.core.rpc_client import RPCClient
+
+                self._coordinator_client = RPCClient(None, ControlCoordinator)
+            except Exception as e:
+                logger.warning(f"ControlCoordinator RPC unreachable: {e}")
+                return None
+        return self._coordinator_client
 
     def _start_broadcast_loop(self) -> None:
         def websocket_vis_loop() -> None:
@@ -182,6 +171,12 @@ class WebsocketVisModule(Module):
         self._broadcast_thread = threading.Thread(target=websocket_vis_loop, daemon=True)  # type: ignore[assignment]
         self._broadcast_thread.start()  # type: ignore[attr-defined]
 
+    def _uses_rerun_web(self) -> bool:
+        rerun_open = getattr(self.config.g, "rerun_open", "native")
+        return self.config.g.viewer == "rerun-web" or (
+            self.config.g.viewer == "rerun" and rerun_open in ("web", "both")
+        )
+
     @rpc
     def start(self) -> None:
         super().start()
@@ -193,9 +188,8 @@ class WebsocketVisModule(Module):
         self._uvicorn_server_thread = threading.Thread(target=self._run_uvicorn_server, daemon=True)
         self._uvicorn_server_thread.start()
 
-        # Auto-open browser only for rerun-web (dashboard with Rerun iframe + command center)
-        # For rerun and foxglove, users access the command center manually if needed
-        if self.config.g.viewer == "rerun-web":
+        # Only auto-open when the user chose web-based viewing.
+        if self._uses_rerun_web():
             url = f"http://localhost:{self.config.port}/"
             logger.info(f"Dimensional Command Center: {url}")
 
@@ -231,12 +225,6 @@ class WebsocketVisModule(Module):
             self.register_disposable(Disposable(unsub))
         except Exception:
             ...
-
-        try:
-            unsub = self.color_image.subscribe(self._on_color_image)
-            self.register_disposable(Disposable(unsub))
-        except Exception as e:
-            logger.warning(f"WebSocket vis: color_image subscribe failed: {e}")
 
     @rpc
     def stop(self) -> None:
@@ -277,11 +265,8 @@ class WebsocketVisModule(Module):
 
         async def serve_index(request):  # type: ignore[no-untyped-def]
             """Serve appropriate HTML based on viewer mode."""
-            # If running native Rerun, redirect to standalone command center
-            if self.config.g.viewer != "rerun-web":
+            if not self._uses_rerun_web():
                 return RedirectResponse(url="/command-center")
-
-            # Otherwise serve full dashboard with Rerun iframe
             return FileResponse(_DASHBOARD_HTML, media_type="text/html")
 
         async def serve_command_center(request):  # type: ignore[no-untyped-def]
@@ -296,32 +281,9 @@ class WebsocketVisModule(Module):
                     media_type="text/plain",
                 )
 
-        async def serve_config(request):  # type: ignore[no-untyped-def]
-            """Per-deployment URLs the React shell reads at boot.
-
-            Centralizing here avoids hardcoded ports/URLs in the
-            frontend; the React app fetches /config on mount.
-            """
-            host = request.url.hostname or "localhost"
-            return JSONResponse(
-                {
-                    "viser_url": f"http://{host}:{self.config.g.viser_port}",
-                    "camera_stream_url": "/camera_stream",
-                }
-            )
-
-        async def serve_camera_stream(request):  # type: ignore[no-untyped-def]
-            """MJPEG (multipart/x-mixed-replace) of the latest color frame."""
-            return StreamingResponse(
-                self._camera_mjpeg_generator(),
-                media_type="multipart/x-mixed-replace; boundary=frame",
-            )
-
         routes = [
             Route("/", serve_index),
             Route("/command-center", serve_command_center),
-            Route("/config", serve_config),
-            Route("/camera_stream", serve_camera_stream),
         ]
 
         starlette_app = Starlette(routes=routes)
@@ -397,60 +359,49 @@ class WebsocketVisModule(Module):
         @self.sio.event  # type: ignore[untyped-decorator]
         async def arm(sid: str, data: dict[str, Any] | None = None) -> None:
             """Dashboard → arm the locomotion policy (with ramp)."""
-            if self.activate and self.activate.transport:
-                logger.info("Dashboard requested arm")
-                self.activate.publish(DimosBool(data=True))
-            else:
-                logger.warning("arm requested but activate transport is not configured")
+            client = self._get_coordinator_client()
+            if client is None:
+                logger.warning("arm requested but ControlCoordinator RPC is unavailable")
+                return
+            logger.info("Dashboard requested arm")
+            client.set_activated(engaged=True)
 
         @self.sio.event  # type: ignore[untyped-decorator]
         async def disarm(sid: str, data: dict[str, Any] | None = None) -> None:
             """Dashboard → disarm; task falls back to hold-current-pose."""
-            if self.activate and self.activate.transport:
-                logger.info("Dashboard requested disarm")
-                self.activate.publish(DimosBool(data=False))
-            else:
-                logger.warning("disarm requested but activate transport is not configured")
+            client = self._get_coordinator_client()
+            if client is None:
+                logger.warning("disarm requested but ControlCoordinator RPC is unavailable")
+                return
+            logger.info("Dashboard requested disarm")
+            client.set_activated(engaged=False)
 
         @self.sio.event  # type: ignore[untyped-decorator]
-        async def respawn(sid: str, data: dict[str, Any] | None = None) -> None:
-            """Dashboard → reset sim to keyframe 0 (home pose).
-
-            Picked up by MujocoSimModule.respawn_cmd via /sim/respawn.
-            No-op if the respawn transport isn't configured (e.g. when
-            running against real hardware instead of MuJoCo).
-            """
-            if self.respawn_cmd and self.respawn_cmd.transport:
-                logger.info("Dashboard requested respawn")
-                self.respawn_cmd.publish(DimosBool(data=True))
-            else:
-                logger.warning("respawn requested but respawn_cmd transport is not configured")
-
-        @self.sio.event  # type: ignore[untyped-decorator]
-        async def set_dry_run(sid: str, data: dict[str, Any]) -> None:
+        async def set_dry_run(sid: str, data: dict[str, Any] | None = None) -> None:
             """Dashboard → toggle dry-run on the locomotion policy.
 
             Payload: ``{"enabled": bool}``.  Task still computes but
             coordinator sends nothing to the adapter when enabled.
             """
-            if self.dry_run and self.dry_run.transport:
-                enabled = bool(data.get("enabled", False))
-                logger.info(f"Dashboard set dry_run = {enabled}")
-                self.dry_run.publish(DimosBool(data=enabled))
-            else:
-                logger.warning("set_dry_run requested but dry_run transport is not configured")
+            client = self._get_coordinator_client()
+            if client is None:
+                logger.warning("set_dry_run requested but ControlCoordinator RPC is unavailable")
+                return
+            enabled = bool((data or {}).get("enabled", False))
+            logger.info(f"Dashboard set dry_run = {enabled}")
+            client.set_dry_run(enabled=enabled)
 
         @self.sio.event  # type: ignore[untyped-decorator]
         async def move_command(sid: str, data: dict[str, Any]) -> None:
             # Publish Twist if transport is configured
-            if self.cmd_vel and self.cmd_vel.transport:
+            if self.tele_cmd_vel and self.tele_cmd_vel.transport:
                 twist = Twist(
                     linear=Vector3(data["linear"]["x"], data["linear"]["y"], data["linear"]["z"]),
                     angular=Vector3(
                         data["angular"]["x"], data["angular"]["y"], data["angular"]["z"]
                     ),
                 )
-                self.cmd_vel.publish(twist)
+                self.tele_cmd_vel.publish(twist)
 
             # Publish TwistStamped if transport is configured
             if self.movecmd_stamped and self.movecmd_stamped.transport:
@@ -514,51 +465,3 @@ class WebsocketVisModule(Module):
     def _emit(self, event: str, data: Any) -> None:
         if self._broadcast_loop and not self._broadcast_loop.is_closed():
             asyncio.run_coroutine_threadsafe(self.sio.emit(event, data), self._broadcast_loop)
-
-    def _on_color_image(self, image: Image) -> None:
-        """Encode the latest frame to JPEG, capped to camera_max_fps."""
-        now = time.monotonic()
-        min_interval = 1.0 / max(self.config.camera_max_fps, 1.0)
-        if now - self._last_encode_time < min_interval:
-            return
-
-        try:
-            bgr: np.ndarray = image.to_bgr().to_opencv()
-            ok, buffer = cv2.imencode(
-                ".jpg",
-                bgr,
-                [int(cv2.IMWRITE_JPEG_QUALITY), int(self.config.camera_jpeg_quality)],
-            )
-            if not ok:
-                return
-            jpeg_bytes = buffer.tobytes()
-        except Exception as e:
-            logger.debug(f"WebSocket vis: JPEG encode failed: {e}")
-            return
-
-        with self._latest_jpeg_lock:
-            self._latest_jpeg = jpeg_bytes
-            self._last_encode_time = now
-        self._frame_available.set()
-
-    async def _camera_mjpeg_generator(self):  # type: ignore[no-untyped-def]
-        """Yield multipart/x-mixed-replace JPEG chunks until the client drops."""
-        boundary = b"--frame\r\n"
-        last_yielded: bytes | None = None
-        # Cap pull rate to encoder rate; sleeping any tighter just busy-spins.
-        poll_interval = 1.0 / max(self.config.camera_max_fps * 2.0, 1.0)
-
-        while True:
-            with self._latest_jpeg_lock:
-                jpeg = self._latest_jpeg
-            if jpeg is not None and jpeg is not last_yielded:
-                last_yielded = jpeg
-                yield (
-                    boundary
-                    + b"Content-Type: image/jpeg\r\nContent-Length: "
-                    + str(len(jpeg)).encode("ascii")
-                    + b"\r\n\r\n"
-                    + jpeg
-                    + b"\r\n"
-                )
-            await asyncio.sleep(poll_interval)
