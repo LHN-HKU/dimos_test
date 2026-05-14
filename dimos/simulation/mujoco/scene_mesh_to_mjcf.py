@@ -590,8 +590,7 @@ def _bake_prims(
     else:
         start_method = "fork"
     logger.info(
-        f"_bake_prims: fanning {len(prims)} prims across "
-        f"{n_workers} workers ({start_method})"
+        f"_bake_prims: fanning {len(prims)} prims across {n_workers} workers ({start_method})"
     )
 
     t0 = time.time()
