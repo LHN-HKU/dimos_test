@@ -14,13 +14,9 @@
 
 """Shared GR00T WBC config — joint lists, gain tables, default arm pose.
 
-Imported by both ``unitree_g1_groot_wbc`` (real hardware) and
-``unitree_g1_groot_wbc_sim`` (MuJoCo + viser + splat camera).  The two
-blueprints differ only in module composition (which adapter, whether
-the viser viewer + splat camera modules are wired) and in the arming
-defaults that match each mode's safety needs; everything that's
-genuinely identical (gain tables, joint ordering, the trained-pose
-zero offset) lives here.
+Kept for older experiments that imported the shared constants directly.
+The runnable stack is now the single ``g1-groot-wbc`` blueprint, with
+``--simulation`` selecting the MuJoCo backend.
 """
 
 from __future__ import annotations

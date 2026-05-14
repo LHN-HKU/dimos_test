@@ -32,7 +32,7 @@ Outputs a JSON file with per-cell results; render with
 Typical session::
 
     # Terminal 1: bring the sim up (must expose point_at and go_home)
-    uv run dimos run unitree-g1-groot-wbc-sim
+    dimos --simulation mujoco run g1-groot-wbc
 
     # Terminal 2: run the eval per arm
     uv run python -m dimos.manipulation.eval_pointing_reachability \\
