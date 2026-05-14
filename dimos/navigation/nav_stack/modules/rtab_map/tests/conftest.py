@@ -46,6 +46,10 @@ RTAB_BIN = Path(__file__).resolve().parent.parent / "cpp" / "result" / "bin" / "
 
 _BINARY_STARTUP_SEC = 1.5
 _DRAIN_SEC = 2.0
+# Frame ID used for both the LCM message header and the LCM payload's own
+# frame_id when publishing. Used by publish_scan and publish_odom — must
+# stay consistent or the binary will reject one or the other.
+_PUBLISH_FRAME = "map"
 
 
 @dataclass
@@ -66,14 +70,13 @@ class RtabHarness:
     proj2d: LcmCollector
 
     def publish_scan(self, points: np.ndarray, ts: float) -> None:
-        msg = make_pointcloud_msg(points, ts, frame_id="map")
-        # The C++ wrapper's lcm_encode helper is not directly exposed for
-        # PointCloud2 in the same way as PGO's tests — encode via the msg's
-        # lcm_encode method to match what the binary expects.
-        self.publisher.publish(self.scan_topic, msg.lcm_encode(frame_id="map"))
+        msg = make_pointcloud_msg(points, ts, frame_id=_PUBLISH_FRAME)
+        self.publisher.publish(self.scan_topic, msg.lcm_encode(frame_id=_PUBLISH_FRAME))
 
     def publish_odom(self, position: np.ndarray, quaternion: np.ndarray, ts: float) -> None:
-        msg = make_odometry_msg(position=position, quaternion=quaternion, ts=ts, frame_id="map")
+        msg = make_odometry_msg(
+            position=position, quaternion=quaternion, ts=ts, frame_id=_PUBLISH_FRAME
+        )
         self.publisher.publish(self.odom_topic, msg.lcm_encode())
 
     def drain(self, seconds: float = _DRAIN_SEC) -> None:
