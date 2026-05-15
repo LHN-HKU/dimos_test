@@ -171,13 +171,27 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(buffer_mutex_);
+        // Replace-on-queue. Per-frame work (rtabmap process + LocalGridMaker
+        // ray tracing + OctoMap update) can run slower than the scan rate on
+        // a real LiDAR (~10 Hz). Without a bound here the buffer grows
+        // unboundedly and the consumer chews through scans from many
+        // seconds ago — the published map ends up reflecting poses far
+        // behind the robot's true position. Drop everything queued and
+        // keep just the latest scan; rtabmap's own keyframe gate
+        // (RGBD/LinearUpdate / AngularUpdate) does the temporal
+        // subsampling for us.
+        if (drop_stale_scans_) {
+            std::queue<ScanFrame> empty;
+            std::swap(buffer_, empty);
+            scan_drops_ += empty.size();
+        }
         buffer_.push(frame);
         if (debug_ && (++scan_count_ % 20 == 1)) {
             fprintf(stderr,
-                    "[rtab DEBUG] scan #%d queued — pts=%zu odom_pos=(%.2f,%.2f,%.2f) ts=%.3f buffer=%zu\n",
+                    "[rtab DEBUG] scan #%d queued — pts=%zu odom_pos=(%.2f,%.2f,%.2f) ts=%.3f buffer=%zu dropped=%d\n",
                     scan_count_, frame.cloud_body->size(),
                     frame.odom_pose.x(), frame.odom_pose.y(), frame.odom_pose.z(),
-                    frame.timestamp, buffer_.size());
+                    frame.timestamp, buffer_.size(), scan_drops_);
         }
     }
 
@@ -193,6 +207,7 @@ public:
     bool unregister_input_ = true;
     double scan_odom_max_dt_ = 0.2;  // seconds
     bool debug_ = false;
+    bool drop_stale_scans_ = true;
 
 private:
     std::mutex buffer_mutex_;
@@ -205,6 +220,7 @@ private:
 
     int odom_count_ = 0;
     int scan_count_ = 0;
+    int scan_drops_ = 0;
 };
 
 struct CachedWorldCloud {
@@ -337,15 +353,15 @@ int main(int argc, char** argv) {
     // is rtabmap's recommended starting point for LiDAR.
     params["RGBD/ProximityPathMaxNeighbors"] =
         mod.arg("rgbd_proximity_path_max_neighbors", "10");
-    // Be permissive about admitting frames. Defaults gate keyframes by
-    // motion/time which makes synthetic short-trajectory test scenes never
-    // produce any local grids. These can be overridden via CLI args if a
-    // caller wants tighter cadence.
+    // Keyframe admission gate. Default to 10cm linear / ~6° angular —
+    // plenty fine for real-time mapping on a 0.6 m/s robot while
+    // letting per-frame rtabmap work (ICP, OctoMap update) run faster
+    // than the scan rate. Synthetic tests with stationary input override
+    // these to 0 so every frame admits.
     params["Rtabmap/DetectionRate"] =
-        mod.arg("rtabmap_detection_rate", "0");  // 0 = every frame
-    params["RGBD/LinearUpdate"] =
-        mod.arg("rgbd_linear_update", "0");  // 0 = no motion threshold
-    params["RGBD/AngularUpdate"] = mod.arg("rgbd_angular_update", "0");
+        mod.arg("rtabmap_detection_rate", "0");  // 0 = motion-gated, not time-gated
+    params["RGBD/LinearUpdate"] = mod.arg("rgbd_linear_update", "0.1");
+    params["RGBD/AngularUpdate"] = mod.arg("rgbd_angular_update", "0.1");
     params["Mem/NotLinkedNodesKept"] = "false";
 
     rtabmap::Rtabmap rtab;
@@ -369,6 +385,7 @@ int main(int argc, char** argv) {
     handlers.unregister_input_ = mod.arg_bool("unregister_input", true);
     handlers.scan_odom_max_dt_ = std::stod(mod.arg("scan_odom_max_dt", "0.2"));
     handlers.debug_ = debug;
+    handlers.drop_stale_scans_ = mod.arg_bool("drop_stale_scans", true);
     lcm.subscribe(odom_topic, &Handlers::on_odometry, &handlers);
     lcm.subscribe(scan_topic, &Handlers::on_registered_scan, &handlers);
 

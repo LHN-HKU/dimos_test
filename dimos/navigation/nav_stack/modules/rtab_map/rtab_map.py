@@ -76,8 +76,18 @@ class RtabMapConfig(NativeModuleConfig):
     # Permissive defaults so short synthetic test trajectories admit
     # keyframes; production callers will want to tighten these.
     rtabmap_detection_rate: float = 0.0
-    rgbd_linear_update: float = 0.0
-    rgbd_angular_update: float = 0.0
+    # 10 cm / ~6° motion gate by default. Real-robot scan rates are higher
+    # than per-frame rtabmap processing can sustain; this gate stops the
+    # input buffer from accumulating stale frames. Synthetic stationary
+    # tests override these to 0 so every frame admits.
+    rgbd_linear_update: float = 0.1
+    rgbd_angular_update: float = 0.1
+    # If true (default), the scan callback drops any older queued scans
+    # when a new one arrives — keep only the latest. Protects against the
+    # buffer growing unboundedly when per-frame processing is slower than
+    # the input scan rate. Set False to preserve every scan (slow but
+    # lossless; pairs with rgbd_linear_update=0 for unit-test scenarios).
+    drop_stale_scans: bool = True
     # rtabmap's one-to-many proximity detection neighbor count; enables
     # geometric (scan-based) loop closure in lidar-only mode.
     rgbd_proximity_path_max_neighbors: int = 10
