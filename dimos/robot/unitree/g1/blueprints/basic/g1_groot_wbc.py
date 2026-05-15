@@ -71,6 +71,7 @@ _REAL_ARM_RAMP_SECONDS = 10.0
 _SIM_POLICY_DECIMATION = 1
 _DEFAULT_COMMAND_CENTER_PORT = 7779
 _DEFAULT_VISER_PORT = 8082
+_DEFAULT_BABYLON_PORT = 8091
 _DEFAULT_POINTCLOUD_FPS = 2.0
 _DEFAULT_LIDAR_VOXEL_SIZE_M = 0.05
 _DEFAULT_LIDAR_CAMERA_WIDTH = 640
@@ -381,10 +382,46 @@ def _sim_support_blueprints(mujoco_mjcf_path: str | Path) -> tuple[Blueprint, ..
         except ModuleNotFoundError as exc:
             logger.warning("Viser disabled because optional dependency is missing: %s", exc.name)
 
+    babylon_stack: tuple[Blueprint, ...] = ()
+    if _env_bool("DIMOS_ENABLE_BABYLON", False):
+        from dimos.visualization.babylon_scene_viewer import BabylonSceneViewerModule
+
+        scene_visual_override = os.environ.get("DIMOS_SCENE_VISUAL_PATH") or None
+        scene_visual_path = scene_visual_override or scene_mesh_path
+        babylon_stack = (
+            BabylonSceneViewerModule.blueprint(
+                mjcf_path=mujoco_mjcf_path,
+                port=_env_int("DIMOS_BABYLON_PORT", _DEFAULT_BABYLON_PORT),
+                scene_path=scene_visual_path,
+                scene_scale=_env_float("DIMOS_SCENE_VISUAL_SCALE", scene_mesh_scale),
+                scene_translation=_env_xyz(
+                    "DIMOS_SCENE_VISUAL_TRANSLATION", scene_mesh_translation
+                ),
+                scene_rotation_zyx_deg=_env_xyz(
+                    "DIMOS_SCENE_VISUAL_ROTATION_ZYX_DEG", scene_mesh_rotation
+                ),
+                scene_y_up=_env_bool("DIMOS_SCENE_VISUAL_Y_UP", scene_mesh_y_up),
+                pointcloud_hz=_env_float("DIMOS_BABYLON_POINTCLOUD_HZ", 2.0),
+                pointcloud_max_points=_env_int("DIMOS_BABYLON_POINTCLOUD_MAX_POINTS", 70000),
+            ).transports(
+                {
+                    ("joint_state", JointState): LCMTransport(
+                        "/coordinator/joint_state", JointState
+                    ),
+                    ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
+                    ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
+                    ("pointcloud_overlay", PointCloud2): LCMTransport("/global_map", PointCloud2),
+                    ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),
+                    ("point_goal", PointStamped): LCMTransport("/point_goal", PointStamped),
+                }
+            ),
+        )
+
     return (
         *mapping_stack,
         ReplanningAStarPlanner.blueprint(),
         *viser_stack,
+        *babylon_stack,
     )
 
 
@@ -406,6 +443,7 @@ g1_groot_wbc = autoconnect(
         ("global_costmap", OccupancyGrid): LCMTransport("/global_costmap", OccupancyGrid),
         ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
         ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),
+        ("point_goal", PointStamped): LCMTransport("/point_goal", PointStamped),
         ("goal_request", PoseStamped): LCMTransport("/goal_request", PoseStamped),
         ("stop_movement", Bool): LCMTransport("/stop_movement", Bool),
     }
