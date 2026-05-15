@@ -59,6 +59,23 @@ class RtabMapConfig(NativeModuleConfig):
     grid_max_obstacle_height: float = 2.0
     grid_max_ground_height: float = 0.05
     grid_range_max: float = 8.0
+
+    # OctoMap log-odds knobs. rtabmap defaults make the OctoMap behave
+    # like a long-term static map (ClampingMax=0.971 → cells saturate
+    # at +3.5 log-odds, ~9 empty-cell observations needed to flip back
+    # to free). For a "treat everything as dynamic" feel — where a chair
+    # that moves out of view actually disappears from the map within
+    # a second or two — we lower ClampingMax. Trade-off: walls flicker
+    # if not constantly observed.
+    #   ProbHit=0.7 → +0.85 log-odds per hit
+    #   ProbMiss=0.4 → -0.41 log-odds per miss
+    #   ProbClampingMax=0.75 → saturation at +1.1 log-odds → ~3 misses
+    #     to clear a saturated cell (~0.6 s at 5 Hz octomap update rate)
+    octomap_prob_hit: float = 0.7
+    octomap_prob_miss: float = 0.4
+    octomap_prob_clamping_max: float = 0.75
+    octomap_prob_clamping_min: float = 0.12
+    octomap_occupancy_thr: float = 0.5
     # Project the cloud into the world's gravity-aligned frame before
     # ground/obstacle segmentation. rtabmap defaults this to false (height
     # threshold applied in the sensor's local frame, where z=0 is the

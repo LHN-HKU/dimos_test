@@ -292,6 +292,18 @@ int main(int argc, char** argv) {
     // with the ground.
     params["Grid/MapFrameProjection"] =
         mod.arg("grid_map_frame_projection", "true");
+    // OctoMap log-odds knobs. Lower ProbClampingMax = more dynamic
+    // (cells flip back to free quickly under empty-cell observations).
+    // rtabmap's default 0.971 saturates at +3.5 log-odds and takes ~9
+    // misses to clear; 0.75 saturates at +1.1 and clears in ~3 misses.
+    params["GridGlobal/ProbHit"] = mod.arg("octomap_prob_hit", "0.7");
+    params["GridGlobal/ProbMiss"] = mod.arg("octomap_prob_miss", "0.4");
+    params["GridGlobal/ProbClampingMax"] =
+        mod.arg("octomap_prob_clamping_max", "0.75");
+    params["GridGlobal/ProbClampingMin"] =
+        mod.arg("octomap_prob_clamping_min", "0.12");
+    params["GridGlobal/OccupancyThr"] =
+        mod.arg("octomap_occupancy_thr", "0.5");
     // Lidar-only mode.
     params["RGBD/Enabled"] = "true";
     params["Reg/Strategy"] = "1";  // ICP
