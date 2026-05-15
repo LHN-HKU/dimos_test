@@ -27,7 +27,7 @@ Wire format (little-endian, packed):
     frame_len    : u16      length of frame_id in bytes
     frame_id     : frame_len bytes (UTF-8)
     point_count  : u32
-    points       : point_count × (
+    points       : point_count * (
                        x: f32, y: f32, z: f32,
                        reflectivity: u16,
                        offset_time_ns: u32,
@@ -156,9 +156,7 @@ class RawLidarScan(Timestamped):
                 f"RawLidarScan: payload truncated, expected {expected_points_bytes} bytes of "
                 f"points after offset {offset}, got {len(data) - offset}"
             )
-        points = np.frombuffer(
-            data, dtype=_POINT_DTYPE, count=point_count, offset=offset
-        ).copy()
+        points = np.frombuffer(data, dtype=_POINT_DTYPE, count=point_count, offset=offset).copy()
         sec_signed = sec_raw if sec_raw < 0x80000000 else sec_raw - 0x100000000
         ts = sec_signed + nsec / 1_000_000_000
         return cls(points=points, frame_id=frame_id, ts=ts)

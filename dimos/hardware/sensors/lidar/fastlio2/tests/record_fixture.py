@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # Copyright 2026 Dimensional Inc.
-# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Record a short live capture from Mid-360 + FastLio2 into a memory2 fixture.
 
 Run from a host with the Mid-360 at 192.168.1.107 on enp2s0 (192.168.1.5/24).
@@ -13,15 +25,17 @@ Streams written:
     odometry      nav_msgs.Odometry        (FastLio2 output)
     world_cloud   sensor_msgs.PointCloud2  (FastLio2 output)
 """
+
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import select
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from typing import Any
 
 import lcm as lcmlib
 
@@ -29,6 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parents[6]
 sys.path.insert(0, str(REPO_ROOT))
 
 from dimos.memory2.store.sqlite import SqliteStore
+from dimos.memory2.stream import Stream
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
@@ -45,7 +60,7 @@ TOPICS = {
     "world_cloud": "/world_cloud#sensor_msgs.PointCloud2",
 }
 
-PAYLOAD_TYPES = {
+PAYLOAD_TYPES: dict[str, type[Any]] = {
     "raw_imu": Imu,
     "raw_lidar": RawLidarScan,
     "odometry": Odometry,
@@ -55,7 +70,9 @@ PAYLOAD_TYPES = {
 
 class StreamRecorder:
     def __init__(self, store: SqliteStore) -> None:
-        self.streams = {name: store.stream(name, PAYLOAD_TYPES[name]) for name in TOPICS}
+        self.streams: dict[str, Stream[Any, Any]] = {
+            name: store.stream(name, PAYLOAD_TYPES[name]) for name in TOPICS
+        }
         self.counts = {name: 0 for name in TOPICS}
         self._lock = threading.Lock()
 
@@ -76,8 +93,9 @@ class StreamRecorder:
 
 def start_proc(cwd: Path, args: list[str]) -> subprocess.Popen[bytes]:
     print(f"[record] launching: {' '.join(args)}", flush=True)
-    return subprocess.Popen(args, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=True)
+    return subprocess.Popen(
+        args, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+    )
 
 
 def _wait_for_stdin(bus: lcmlib.LCM) -> None:
@@ -104,15 +122,28 @@ def stop_proc(proc: subprocess.Popen[bytes], timeout: float = 3.0) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", "-o", default="tests/data/fastlio2_replay.db",
-                        help="memory2 SqliteStore path (default: %(default)s)")
-    parser.add_argument("--duration", "-d", type=float, default=None,
-                        help="recording length in seconds. If omitted, "
-                             "interactively prompts to start and to stop.")
-    parser.add_argument("--lidar-ip", default="192.168.1.107",
-                        help="Mid-360 IP (default: %(default)s)")
-    parser.add_argument("--warmup", type=float, default=2.0,
-                        help="seconds to let the pipeline stabilize before the start prompt")
+    parser.add_argument(
+        "--output",
+        "-o",
+        default="tests/data/fastlio2_replay.db",
+        help="memory2 SqliteStore path (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--duration",
+        "-d",
+        type=float,
+        default=None,
+        help="recording length in seconds. If omitted, interactively prompts to start and to stop.",
+    )
+    parser.add_argument(
+        "--lidar-ip", default="192.168.1.107", help="Mid-360 IP (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--warmup",
+        type=float,
+        default=2.0,
+        help="seconds to let the pipeline stabilize before the start prompt",
+    )
     args = parser.parse_args()
 
     output_path = Path(args.output)
@@ -127,24 +158,36 @@ def main() -> int:
         LIVOX_DIR,
         [
             str(LIVOX_DIR / "result/bin/mid360_native"),
-            "--raw_lidar", TOPICS["raw_lidar"],
-            "--imu", TOPICS["raw_imu"],
-            "--frame_id", "lidar",
-            "--imu_frame_id", "imu",
-            "--lidar_ip", args.lidar_ip,
+            "--raw_lidar",
+            TOPICS["raw_lidar"],
+            "--imu",
+            TOPICS["raw_imu"],
+            "--frame_id",
+            "lidar",
+            "--imu_frame_id",
+            "imu",
+            "--lidar_ip",
+            args.lidar_ip,
         ],
     )
     fastlio = start_proc(
         FASTLIO_DIR,
         [
             str(FASTLIO_DIR / "result/bin/fastlio2_native"),
-            "--raw_imu", TOPICS["raw_imu"],
-            "--raw_lidar", TOPICS["raw_lidar"],
-            "--lidar", TOPICS["world_cloud"],
-            "--odometry", TOPICS["odometry"],
-            "--config_path", "config/mid360.yaml",
-            "--frame_id", "odom",
-            "--child_frame_id", "base_link",
+            "--raw_imu",
+            TOPICS["raw_imu"],
+            "--raw_lidar",
+            TOPICS["raw_lidar"],
+            "--lidar",
+            TOPICS["world_cloud"],
+            "--odometry",
+            TOPICS["odometry"],
+            "--config_path",
+            "config/mid360.yaml",
+            "--frame_id",
+            "odom",
+            "--child_frame_id",
+            "base_link",
         ],
     )
 
@@ -153,10 +196,16 @@ def main() -> int:
     bus = lcmlib.LCM()
     subs = []
     for name, topic in TOPICS.items():
-        subs.append(bus.subscribe(topic, lambda c, d, n=name: recorder._on(n, d)))
 
-    print(f"[record] warming up for {args.warmup}s (FastLio IMU init, no data saved yet) …",
-          flush=True)
+        def _cb(_chan: str, data: bytes, n: str = name) -> None:
+            recorder._on(n, data)
+
+        subs.append(bus.subscribe(topic, _cb))
+
+    print(
+        f"[record] warming up for {args.warmup}s (FastLio IMU init, no data saved yet) …",
+        flush=True,
+    )
     warmup_end = time.time() + args.warmup
     while time.time() < warmup_end:
         bus.handle_timeout(50)
@@ -192,7 +241,9 @@ def main() -> int:
     for name, n in recorder.counts.items():
         rate = n / capture_duration if capture_duration > 0 else 0.0
         print(f"  {name:14s} {n:6d}  ({rate:6.1f} Hz)")
-    print(f"\n[record] fixture written to {output_path} ({output_path.stat().st_size/1e6:.1f} MB)")
+    print(
+        f"\n[record] fixture written to {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)"
+    )
 
     bad = [name for name, n in recorder.counts.items() if n == 0]
     if bad:

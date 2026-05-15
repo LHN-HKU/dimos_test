@@ -1,5 +1,17 @@
 # Copyright 2026 Dimensional Inc.
-# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Replay-based test for the pure FastLio2 native module.
 
 Loads a memory2 sqlite fixture captured against a live Mid-360
@@ -13,12 +25,13 @@ Styled after dimos/navigation/nav_stack/tests/rosbag_fixtures.py.
 Marked slow because it spawns the C++ binary and waits on LCM bus
 delivery in real time (~recording-length seconds).
 """
+
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
 import threading
 import time
-from pathlib import Path
 
 import lcm as lcmlib
 import pytest
@@ -78,13 +91,20 @@ def _start_native(binary_path: Path) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [
             str(binary_path),
-            "--raw_imu", TOPIC_RAW_IMU,
-            "--raw_lidar", TOPIC_RAW_LIDAR,
-            "--lidar", TOPIC_WORLD,
-            "--odometry", TOPIC_ODOM,
-            "--config_path", str(FASTLIO_CONFIG),
-            "--frame_id", "odom",
-            "--child_frame_id", "base_link",
+            "--raw_imu",
+            TOPIC_RAW_IMU,
+            "--raw_lidar",
+            TOPIC_RAW_LIDAR,
+            "--lidar",
+            TOPIC_WORLD,
+            "--odometry",
+            TOPIC_ODOM,
+            "--config_path",
+            str(FASTLIO_CONFIG),
+            "--frame_id",
+            "odom",
+            "--child_frame_id",
+            "base_link",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -157,8 +177,9 @@ def test_fastlio2_replay_produces_outputs(
         bus.subscribe(TOPIC_WORLD, on_world)
 
         stop_event = threading.Event()
-        worker = threading.Thread(target=_collect_outputs, args=(bus, stop_event, collected),
-                                  daemon=True)
+        worker = threading.Thread(
+            target=_collect_outputs, args=(bus, stop_event, collected), daemon=True
+        )
         worker.start()
 
         time.sleep(_PROCESS_STARTUP_SEC)
@@ -185,8 +206,15 @@ def test_fastlio2_replay_produces_outputs(
     first_odom = Odometry.lcm_decode(collected["odometry"][0][1])
     p = first_odom.pose.position
     o = first_odom.pose.orientation
-    for name, v in (("x", p.x), ("y", p.y), ("z", p.z),
-                    ("qx", o.x), ("qy", o.y), ("qz", o.z), ("qw", o.w)):
+    for name, v in (
+        ("x", p.x),
+        ("y", p.y),
+        ("z", p.z),
+        ("qx", o.x),
+        ("qy", o.y),
+        ("qz", o.z),
+        ("qw", o.w),
+    ):
         assert v == v, f"pose.{name} is NaN"  # NaN != NaN
         assert abs(v) < 1e9, f"pose.{name}={v} is implausibly large"
 
