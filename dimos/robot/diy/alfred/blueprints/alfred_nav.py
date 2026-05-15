@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
@@ -25,7 +26,7 @@ from dimos.robot.diy.alfred.config import ALFRED, LOCAL_PLANNER_PRECOMPUTED_PATH
 from dimos.robot.diy.alfred.effector_high_level import AlfredHighLevel
 from dimos.visualization.vis_module import vis_module
 
-nav_config = dict(
+nav_config: dict[str, Any] = dict(
     planner="simple",
     vehicle_height=0.5,
     max_speed=0.8,
