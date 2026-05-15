@@ -355,7 +355,7 @@ class _MockVideoCapture:
 
 
 def test_capture_frames_from_webcam_mocked_space_fills_target(monkeypatch) -> None:
-    """T3.8: SPACE accepts frames with chessboard overlay path; ``no_display`` skips GUI."""
+    """SPACE accepts frames with chessboard overlay path; ``no_display`` skips GUI."""
     cols, rows = 9, 6
     gray = _synthetic_chessboard_gray(640, 480, cols, rows, square_px=40)
     bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
@@ -433,7 +433,7 @@ def test_capture_frames_from_webcam_no_display_false_calls_imshow(monkeypatch) -
     reason="DIMOS_TEST_NO_CAMERA is set (skip hardware camera smoke in CI).",
 )
 def test_opencv_video_capture_device_zero_opens_when_camera_available() -> None:
-    """T3.8: opt-in hardware check when ``DIMOS_TEST_NO_CAMERA`` is unset."""
+    """Opt-in hardware check when ``DIMOS_TEST_NO_CAMERA`` is unset."""
     cap = cv2.VideoCapture(0)
     try:
         assert cap.isOpened()
@@ -442,7 +442,7 @@ def test_opencv_video_capture_device_zero_opens_when_camera_available() -> None:
 
 
 def test_load_frames_from_folder_count_order_and_pixels(tmp_path) -> None:
-    """T3.7: sorted ``*.png`` / ``*.jpg`` / ``*.jpeg``; correct count and load order."""
+    """Sorted ``*.png`` / ``*.jpg`` / ``*.jpeg``; correct count and load order."""
     h, w = 24, 32
     # Write out of lexicographic order; expect sorted basenames: 01, 02, 03.
     cv2.imwrite(str(tmp_path / "02.png"), np.full((h, w, 3), (10, 20, 30), dtype=np.uint8))
@@ -468,7 +468,7 @@ def test_find_chessboard_corners_synthetic_board_returns_expected_count() -> Non
 
 
 def test_calibrate_from_frames_synthetic_twelve_views_rms_and_K_near_truth() -> None:
-    """T3.6: 12 OpenCV-synthesized chessboard views from known ``K``; ``rms`` < 1 px; ``K`` ~ truth."""
+    """12 OpenCV-synthesized chessboard views from known ``K``; ``rms`` < 1 px; ``K`` ~ truth."""
     cols, rows = 9, 6
     width, height = 640, 480
     square_size_m = 0.025
@@ -537,7 +537,7 @@ def test_write_camera_info_yaml_round_trip_matches_k_d_size_and_model() -> None:
 
 
 def test_write_camera_info_yaml_round_trip_load_camera_info_and_opencv() -> None:
-    """YAML written by ``write_camera_info_yaml`` round-trips through both loaders (T3.3)."""
+    """YAML written by ``write_camera_info_yaml`` round-trips through both loaders."""
     K = np.array([[600.0, 0.5, 400.0], [0.0, 605.0, 300.5], [0.0, 0.0, 1.0]], dtype=np.float64)
     D = np.array([-0.12, 0.08, 0.002, -0.001, 0.0], dtype=np.float64)
     R = np.array([[0.999, -0.01, 0.0], [0.01, 0.999, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
