@@ -12,17 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native C++ RtabMap module — alternative SLAM provider to PGO.
-
-Wraps `result/bin/rtab_map`, a C++ binary that links librtabmap and
-consumes FastLIO2 odometry as an external odom source. Defaults match the
-user spec: 3D enabled, OctoMap enabled, raycasting / point clearing enabled.
-The binary subscribes to and publishes on LCM channels matching the streams
-declared here. ``rtab_tf`` carries the ``map -> odom`` correction as an
-:class:`Odometry` message (parity with PGO's ``pgo_tf``); we re-publish it
-through :attr:`self.tf` exactly the way PGO does.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
