@@ -120,7 +120,6 @@ misc = [
     "catkin_pkg",
     "lark",
     "tiktoken>=0.8.0",
-    "python-multipart>=0.0.27",
     "tensorzero==2025.7.5",
 
     # Developer Specific
@@ -179,6 +178,7 @@ web = [
     "sse-starlette>=2.2.1",
     "uvicorn>=0.34.0",
     "jinja2>=3.1.6",
+    "python-multipart>=0.0.27",
     "ffmpeg-python",
     "soundfile",
 ]
