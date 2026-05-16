@@ -315,14 +315,13 @@ def feed_at_original_timing(
         lcm.publish(topic, msg.lcm_encode())
 
 
-# ---------------------------------------------------------------------------
-# Module-based playback (preferred for tests built on autoconnect/Blueprint).
-# ---------------------------------------------------------------------------
+PLAYBACK_STARTUP_DELAY_SEC = 2.0
 
 
 class RosbagScanOdomPlaybackConfig(ModuleConfig):
     rosbag_path: str | None = None
     odom_subsample: int = 4
+    startup_delay_sec: float = PLAYBACK_STARTUP_DELAY_SEC
 
 
 class RosbagScanOdomPlaybackModule(Module):
@@ -346,6 +345,8 @@ class RosbagScanOdomPlaybackModule(Module):
         self._playback_task.cancel()
 
     async def _run_playback(self) -> None:
+        if self.config.startup_delay_sec > 0:
+            await asyncio.sleep(self.config.startup_delay_sec)
         timeline: list[tuple[str, float, Any]] = []
         for odom_index in range(0, len(self._window.odom), self.config.odom_subsample):
             row = self._window.odom[odom_index]
