@@ -100,16 +100,24 @@ class MujocoEngine(SimulationEngine):
         on_before_step: StepHook | None = None,
         on_after_step: StepHook | None = None,
         assets: dict[str, bytes] | None = None,
+        spawn_xy: tuple[float, float] | None = None,
+        spawn_z: float | None = None,
+        spawn_yaw: float | None = None,
     ) -> None:
         super().__init__(config_path=config_path, headless=headless)
         self._on_before_step: StepHook | None = on_before_step
         self._on_after_step: StepHook | None = on_after_step
+        self._spawn_xy = spawn_xy
+        self._spawn_z = spawn_z
+        self._spawn_yaw = spawn_yaw
 
         xml_path = self._resolve_xml_path(config_path)
         self._model = self._load_model(xml_path, meshdir=meshdir, assets=assets)
         self._xml_path = xml_path
 
         self._data = mujoco.MjData(self._model)
+        self._lock = threading.Lock()
+        self._reset_requested = threading.Event()
         self._joint_mappings = build_joint_mappings(self._xml_path, self._model)
         self._joint_names = [mapping.name for mapping in self._joint_mappings]
         self._num_joints = len(self._joint_names)
@@ -127,7 +135,6 @@ class MujocoEngine(SimulationEngine):
                 break
 
         self._connected = False
-        self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._sim_thread: threading.Thread | None = None
 
@@ -139,6 +146,7 @@ class MujocoEngine(SimulationEngine):
         self._joint_velocity_targets = [0.0] * self._num_joints
         self._joint_effort_targets = [0.0] * self._num_joints
         self._command_mode = "position"
+        self._apply_spawn_pose_unlocked()
         for i, mapping in enumerate(self._joint_mappings):
             current_pos = self._current_position(mapping)
             self._joint_position_targets[i] = current_pos
@@ -403,6 +411,42 @@ class MujocoEngine(SimulationEngine):
             state.rgb_renderer.close()
             state.depth_renderer.close()
 
+    def _reset_unlocked(self) -> None:
+        if self._model.nkey > 0:
+            mujoco.mj_resetDataKeyframe(self._model, self._data, 0)
+        else:
+            mujoco.mj_resetData(self._model, self._data)
+        self._apply_spawn_pose_unlocked()
+        for i, mapping in enumerate(self._joint_mappings):
+            self._joint_position_targets[i] = self._current_position(mapping)
+        self._command_mode = "position"
+
+    def _apply_spawn_pose_unlocked(self) -> None:
+        qpos_adr = self._root_free_qpos_adr
+        if qpos_adr is None:
+            mujoco.mj_forward(self._model, self._data)
+            return
+
+        qpos = self._data.qpos
+        if self._spawn_xy is not None:
+            qpos[qpos_adr] = self._spawn_xy[0]
+            qpos[qpos_adr + 1] = self._spawn_xy[1]
+        if self._spawn_z is not None:
+            qpos[qpos_adr + 2] = self._spawn_z
+        if self._spawn_yaw is not None:
+            qpos[qpos_adr + 3 : qpos_adr + 7] = [
+                math.cos(self._spawn_yaw * 0.5),
+                0.0,
+                0.0,
+                math.sin(self._spawn_yaw * 0.5),
+            ]
+
+        qvel_adr = self._root_free_qvel_adr
+        if qvel_adr is not None:
+            self._data.qvel[qvel_adr : qvel_adr + 6] = 0.0
+        self._root_kinematic_pose = None
+        mujoco.mj_forward(self._model, self._data)
+
     def _sim_loop(self, on_started: Callable[[], None] | None = None) -> None:
         logger.info("sim loop started", cls=self.__class__.__name__)
         dt = 1.0 / self._control_frequency
@@ -412,6 +456,10 @@ class MujocoEngine(SimulationEngine):
 
         def _step_once(sync_viewer: bool) -> None:
             loop_start = time.time()
+            if self._reset_requested.is_set():
+                with self._lock:
+                    self._reset_requested.clear()
+                    self._reset_unlocked()
             if self._on_before_step is not None:
                 try:
                     self._on_before_step(self)
@@ -557,10 +605,10 @@ class MujocoEngine(SimulationEngine):
 
     def reset(self) -> None:
         with self._lock:
-            mujoco.mj_resetDataKeyframe(self._model, self._data, 0)
-            mujoco.mj_forward(self._model, self._data)
-            for i, mapping in enumerate(self._joint_mappings):
-                self._joint_position_targets[i] = self._current_position(mapping)
+            self._reset_unlocked()
+
+    def request_reset(self) -> None:
+        self._reset_requested.set()
 
     def enforce_position_targets(self) -> None:
         """Pin modeled joints to their current position targets.

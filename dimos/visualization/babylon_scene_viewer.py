@@ -19,7 +19,7 @@ import mimetypes
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 
 import mujoco
 import numpy as np
@@ -36,9 +36,12 @@ from dimos.core.module import Module
 from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path as PathMsg
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2, _get_colormap_lut
+from dimos.spec.utils import Spec
 from dimos.utils.logging_config import setup_logger
 from dimos.visualization.viser.robot_meshes import (
     RobotMeshes,
@@ -53,6 +56,10 @@ _DEFAULT_BROADCAST_HZ = 20.0
 _DEFAULT_PORT = 8091
 _DEFAULT_POINTCLOUD_HZ = 2.0
 _DEFAULT_POINTCLOUD_MAX_POINTS = 70000
+
+
+class MujocoRespawnSpec(Spec, Protocol):
+    def respawn(self) -> bool: ...
 
 
 def _compose_scene_mesh_wxyz(
@@ -101,6 +108,8 @@ class BabylonSceneViewerModule(Module):
     pointcloud_overlay: In[PointCloud2]
     clicked_point: Out[PointStamped]
     point_goal: Out[PointStamped]
+    cmd_vel: Out[Twist]
+    _mujoco_sim: MujocoRespawnSpec | None = None
 
     def __init__(
         self,
@@ -282,6 +291,16 @@ class BabylonSceneViewerModule(Module):
 
     def _handle_client_message(self, message: dict[str, Any]) -> None:
         message_type = message.get("type")
+        if message_type == "respawn":
+            if self._mujoco_sim is not None:
+                self._mujoco_sim.respawn()
+            self.cmd_vel.publish(Twist.zero())
+            return
+        if message_type == "cmd_vel":
+            twist = self._parse_twist(message)
+            if twist is not None:
+                self.cmd_vel.publish(twist)
+            return
         if message_type not in {"clicked_point", "point_goal"}:
             return
         point = message.get("point")
@@ -296,6 +315,22 @@ class BabylonSceneViewerModule(Module):
             self.clicked_point.publish(stamped)
         else:
             self.point_goal.publish(stamped)
+
+    @staticmethod
+    def _parse_twist(message: dict[str, Any]) -> Twist | None:
+        linear = message.get("linear", [0.0, 0.0, 0.0])
+        angular = message.get("angular", [0.0, 0.0, 0.0])
+        if not isinstance(linear, list) or not isinstance(angular, list):
+            return None
+        if len(linear) != 3 or len(angular) != 3:
+            return None
+        try:
+            return Twist(
+                linear=Vector3(*(float(value) for value in linear)),
+                angular=Vector3(*(float(value) for value in angular)),
+            )
+        except (TypeError, ValueError):
+            return None
 
     def _broadcast_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -497,6 +532,8 @@ _HTML = r"""<!doctype html>
       <button id="toggleScene" data-active="true">Scene</button>
       <button id="loadScene">Load</button>
       <button id="toggleRobot" data-active="true">Robot</button>
+      <button id="toggleDrive" data-active="false">Drive</button>
+      <button id="respawnRobot">Respawn</button>
       <button id="toggleLidar" data-active="true">Lidar</button>
       <button id="navClick" data-active="false">Nav</button>
       <button id="pointClick" data-active="false">Point</button>
@@ -548,7 +585,7 @@ _HTML = r"""<!doctype html>
       const bodyNodes = new Map();
       const sceneMeshes = [];
       const robotMeshes = [];
-      const heavySceneBytes = 256 * 1024 * 1024;
+      const maxAutoSceneBytes = 2 * 1024 * 1024 * 1024;
       const params = new URLSearchParams(window.location.search);
       const useRobotMesh = params.get("robot") !== "proxy";
       const sceneMode = params.get("scene") || "auto";
@@ -565,8 +602,15 @@ _HTML = r"""<!doctype html>
       let sceneDepthEnabled = true;
       let sceneWireEnabled = false;
       let forceVisibleEnabled = false;
+      let driveEnabled = false;
+      let lastDriveSendTime = 0;
+      let lastDriveSignature = "";
       let proxyMaterial = null;
       const pressedKeys = new Set();
+      const driveSendPeriod = 0.08;
+      const driveLinearSpeed = 0.35;
+      const driveStrafeSpeed = 0.25;
+      const driveAngularSpeed = 0.8;
 
       const vec3 = (values) => new BABYLON.Vector3(values[0], values[1], values[2]);
       const quatWxyz = (values) =>
@@ -637,6 +681,7 @@ _HTML = r"""<!doctype html>
       }
 
       function updateKeyboardCamera() {
+        if (driveEnabled) return;
         const deltaSeconds = Math.min(engine.getDeltaTime() / 1000, 0.05);
         const speed = (pressedKeys.has("shift") ? 8.0 : 2.7) * deltaSeconds;
         const up = new BABYLON.Vector3(0, 0, 1);
@@ -657,6 +702,59 @@ _HTML = r"""<!doctype html>
         if (move.lengthSquared() === 0) return;
         move.normalize().scaleInPlace(speed);
         camera.target.addInPlace(move);
+      }
+
+      function sendSocketPayload(payload) {
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+        socket.send(JSON.stringify(payload));
+        return true;
+      }
+
+      function currentDriveTwist() {
+        const speedScale = pressedKeys.has("shift") ? 1.8 : 1.0;
+        let linearX = 0.0;
+        let linearY = 0.0;
+        let angularZ = 0.0;
+
+        if (pressedKeys.has("w")) linearX += driveLinearSpeed * speedScale;
+        if (pressedKeys.has("s")) linearX -= driveLinearSpeed * speedScale;
+        if (pressedKeys.has("q")) linearY += driveStrafeSpeed * speedScale;
+        if (pressedKeys.has("e")) linearY -= driveStrafeSpeed * speedScale;
+        if (pressedKeys.has("a")) angularZ += driveAngularSpeed * speedScale;
+        if (pressedKeys.has("d")) angularZ -= driveAngularSpeed * speedScale;
+
+        return {
+          linear: [linearX, linearY, 0.0],
+          angular: [0.0, 0.0, angularZ],
+        };
+      }
+
+      function sendDriveCommand(force = false) {
+        if (!driveEnabled && !force) return;
+        const now = performance.now() / 1000;
+        if (!force && now - lastDriveSendTime < driveSendPeriod) return;
+
+        const twist = force
+          ? { linear: [0.0, 0.0, 0.0], angular: [0.0, 0.0, 0.0] }
+          : currentDriveTwist();
+        const signature = JSON.stringify(twist);
+        const isZero =
+          twist.linear.every((value) => Math.abs(value) < 1e-6) &&
+          twist.angular.every((value) => Math.abs(value) < 1e-6);
+        if (!force && isZero && signature === lastDriveSignature) return;
+
+        if (sendSocketPayload({ type: "cmd_vel", ...twist })) {
+          lastDriveSendTime = now;
+          lastDriveSignature = signature;
+        }
+      }
+
+      function setDriveEnabled(enabled) {
+        driveEnabled = enabled;
+        setButtonActive("toggleDrive", enabled);
+        setStatus(enabled ? "drive: WASD turn/move, QE strafe" : "live");
+        if (!enabled) sendDriveCommand(true);
       }
 
       function setSceneDepthWrite(enabled) {
@@ -746,9 +844,8 @@ _HTML = r"""<!doctype html>
         if (sceneLoadStarted) return;
         sceneLoadStarted = true;
         if (!config.sceneFile) return;
-        const forceHeavyScene = new URLSearchParams(window.location.search).get("heavy") === "1";
-        if (config.sceneBytes > heavySceneBytes && !forceHeavyScene) {
-          setStatus("scene too large; set DIMOS_SCENE_VISUAL_PATH");
+        if (config.sceneBytes > maxAutoSceneBytes) {
+          setStatus("scene exceeds browser load guard");
           return;
         }
         setStatus("loading scene");
@@ -1027,6 +1124,12 @@ _HTML = r"""<!doctype html>
         const visible = document.getElementById("toggleRobot").dataset.active !== "true";
         setRobotVisibility(visible);
       };
+      document.getElementById("toggleDrive").onclick = () => setDriveEnabled(!driveEnabled);
+      document.getElementById("respawnRobot").onclick = () => {
+        sendDriveCommand(true);
+        sendSocketPayload({ type: "respawn" });
+        setStatus("respawn requested");
+      };
       document.getElementById("toggleLidar").onclick = () => setLidarVisibility(!lidarVisible);
       document.getElementById("navClick").onclick = () => setClickMode("nav");
       document.getElementById("pointClick").onclick = () => setClickMode("point");
@@ -1066,6 +1169,11 @@ _HTML = r"""<!doctype html>
       window.addEventListener("keydown", (event) => {
         const key = event.key.toLowerCase();
         if (key === "shift") pressedKeys.add("shift");
+        if (key === " ") {
+          if (driveEnabled) sendDriveCommand(true);
+          event.preventDefault();
+          return;
+        }
         if (!["w", "a", "s", "d", "q", "e"].includes(key)) return;
         pressedKeys.add(key);
         event.preventDefault();
@@ -1077,8 +1185,14 @@ _HTML = r"""<!doctype html>
         pressedKeys.delete(key);
       });
 
+      window.addEventListener("blur", () => {
+        pressedKeys.clear();
+        sendDriveCommand(true);
+      });
+
       function renderFrame() {
         updateKeyboardCamera();
+        sendDriveCommand(false);
         scene.render();
       }
 

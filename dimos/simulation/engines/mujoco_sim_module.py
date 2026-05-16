@@ -126,6 +126,9 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     enable_kinematic_base_control: bool = False
     enable_kinematic_joint_hold: bool = False
     inject_legacy_assets: bool = False
+    spawn_xy: tuple[float, float] | None = None
+    spawn_z: float | None = None
+    spawn_yaw: float | None = None
     imu_gyro_sensor_names: list[str] = Field(
         default_factory=lambda: [
             "imu-pelvis-angular-velocity",
@@ -264,6 +267,9 @@ class MujocoSimModule(
             on_before_step=self._apply_shm_commands,
             on_after_step=self._after_step,
             assets=engine_assets,
+            spawn_xy=self.config.spawn_xy,
+            spawn_z=self.config.spawn_z,
+            spawn_yaw=self.config.spawn_yaw,
         )
 
         dof = self.config.dof
@@ -499,6 +505,17 @@ class MujocoSimModule(
         if errors:
             op, err = errors[0]
             raise RuntimeError(f"MujocoSimModule.stop() failed during {op}: {err}") from err
+
+    @rpc
+    def respawn(self) -> bool:
+        engine = self._engine
+        if engine is None:
+            return False
+        with self._cmd_vel_lock:
+            self._cmd_vel = Twist.zero()
+            self._last_cmd_vel_time = 0.0
+        engine.request_reset()
+        return True
 
     def _apply_shm_commands(self, engine: MujocoEngine) -> None:
         if self._sim_hooks is not None:

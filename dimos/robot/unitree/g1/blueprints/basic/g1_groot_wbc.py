@@ -79,6 +79,7 @@ _DEFAULT_LIDAR_CAMERA_HEIGHT = 360
 _DEFAULT_GLOBAL_MAP_VOXEL_SIZE_M = 0.05
 _DEFAULT_CUSTOM_SCENE_SCALE = 0.05
 _DEFAULT_OFFICE_MESH_SCALE = 2.0
+_DEFAULT_G1_SPAWN_Z_M = 0.793
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,8 @@ def _select_backend() -> _BackendSelection:
         enable_kinematic_base_control=_env_bool("DIMOS_KINEMATIC_BASE_CONTROL", False),
         enable_kinematic_joint_hold=_env_bool("DIMOS_MUJOCO_KINEMATIC_JOINT_HOLD", False),
         inject_legacy_assets=True,
+        spawn_xy=global_config.mujoco_start_pos_float,
+        spawn_z=_env_float("DIMOS_MUJOCO_START_Z", _DEFAULT_G1_SPAWN_Z_M),
     )
     return _BackendSelection(
         blueprint=backend,
@@ -315,7 +318,9 @@ def _websocket_blueprint(cmd_vel_topic: str) -> Blueprint:
     )
 
 
-def _sim_support_blueprints(mujoco_mjcf_path: str | Path) -> tuple[Blueprint, ...]:
+def _sim_support_blueprints(
+    mujoco_mjcf_path: str | Path, cmd_vel_topic: str
+) -> tuple[Blueprint, ...]:
     if not global_config.simulation:
         return ()
 
@@ -411,6 +416,7 @@ def _sim_support_blueprints(mujoco_mjcf_path: str | Path) -> tuple[Blueprint, ..
                     ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
                     ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
                     ("pointcloud_overlay", PointCloud2): LCMTransport("/global_map", PointCloud2),
+                    ("cmd_vel", Twist): LCMTransport(cmd_vel_topic, Twist),
                     ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),
                     ("point_goal", PointStamped): LCMTransport("/point_goal", PointStamped),
                 }
@@ -432,7 +438,7 @@ g1_groot_wbc = autoconnect(
     _backend_selection.blueprint,
     _coordinator,
     _websocket_blueprint(_cmd_vel_topic),
-    *_sim_support_blueprints(_backend_selection.viewer_mjcf_path),
+    *_sim_support_blueprints(_backend_selection.viewer_mjcf_path, _cmd_vel_topic),
 ).transports(
     {
         ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
