@@ -93,7 +93,6 @@ def test_module_file():
     path.write_text(original)
 
 
-@pytest.mark.slow
 def test_module_reloading(repl, greeting, response, test_module_file):
     # Child process must use LCM: this file spies with pLCMTransport, while the
     # default on Darwin (when Zenoh is installed) is Zenoh.
