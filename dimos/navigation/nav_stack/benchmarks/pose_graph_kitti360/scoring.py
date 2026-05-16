@@ -42,10 +42,8 @@ from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 
-# Default tag value used by the PGO publisher to mark loop-closure edges in
-# the orientation.w field of pose_graph_edges PoseStamped pairs (odometry
-# edges use 1.0). Both knobs are exposed on PoseGraphScoringConfig so any
-# other pose-graph producer can dial in its own marker.
+# Producer convention used by PGO and the default for any other
+# LoopClosure implementer that doesn't override it.
 DEFAULT_LOOP_CLOSURE_TRAVERSABILITY = 0.4
 DEFAULT_TRAVERSABILITY_TOLERANCE = 0.05
 
@@ -84,10 +82,6 @@ class PoseGraphScoringConfig(ModuleConfig):
     # JSON-friendly form of LoopGroundtruth.valid_loops_per_query:
     # frame_id → list of frame_ids that form valid loop pairs.
     valid_loops_per_query: dict[int, list[int]] = Field(default_factory=dict)
-    # Tag value the publisher writes into orientation.w to mark a
-    # pose_graph_edges PoseStamped pair as a loop closure (vs the
-    # odometry-edge default of 1.0). Both fields are config-driven so
-    # different pose-graph SLAM producers can plug in their own marker.
     loop_closure_traversability: float = DEFAULT_LOOP_CLOSURE_TRAVERSABILITY
     traversability_tolerance: float = DEFAULT_TRAVERSABILITY_TOLERANCE
 

@@ -14,9 +14,10 @@
 
 """Module that streams a KITTI-360 sequence as scan + odometry messages.
 
-Drop this into any blueprint that expects ``registered_scan: In[PointCloud2]``
-and ``odometry: In[Odometry]`` (e.g. a pose-graph SLAM module). The blueprint
-auto-connects the streams by name.
+Pairs with any module satisfying ``LoopClosure``
+(see ``dimos/navigation/nav_stack/specs.py``); autoconnect wires the
+``registered_scan: In[PointCloud2]`` and ``odometry: In[Odometry]``
+streams by name.
 """
 
 from __future__ import annotations

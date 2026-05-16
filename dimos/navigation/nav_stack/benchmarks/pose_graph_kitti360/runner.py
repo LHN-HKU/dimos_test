@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generic KITTI-360 loop-closure benchmark for any pose-graph SLAM module.
+"""Generic KITTI-360 loop-closure benchmark for any module satisfying
+``LoopClosure`` (see ``dimos/navigation/nav_stack/specs.py``).
 
-Drop in any module that publishes ``pose_graph_edges: Out[NavPath]`` and
-``loop_closure: Out[NavPath]`` and consumes ``registered_scan: In[PointCloud2]``
-+ ``odometry: In[Odometry]`` — the playback + scoring modules wire into it via
-``autoconnect`` and the runner doesn't care which implementation it is.
+The playback + scoring modules wire into the producer via ``autoconnect``;
+the runner doesn't care which implementation it is.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-from dimos.core.coordination.blueprints import Blueprint, autoconnect
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.kitti360_loader import (
     load_kitti360_sequence,
@@ -45,13 +44,14 @@ from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.playback import (
 from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.scoring import (
     PoseGraphScoringModule,
 )
+from dimos.navigation.nav_stack.specs import LoopClosure
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
 
 def run_benchmark(
-    module_under_test: Blueprint,
+    module_under_test: LoopClosure,
     kitti360_root: Path,
     sequence_id: int = 2,
     max_scans: int | None = None,
