@@ -253,7 +253,7 @@ def nav_stack_rerun_config(
     # scale/limit rendering (mostly preveting rerun from crashing)
     resolved.setdefault("max_hz", {})
     resolved["max_hz"] = {
-        resolved["max_hz"].get(each_entity, default_max_hz) * vis_throttle
+        each_entity: resolved["max_hz"].get(each_entity, default_max_hz) * vis_throttle
         for each_entity in visual_override
     }
 
