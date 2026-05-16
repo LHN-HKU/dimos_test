@@ -76,6 +76,15 @@ def main() -> None:
         help="wrapper-side filter: drop detected loops whose signature-id gap "
         "is below this (default 50, matching KITTI-360 GT min frame gap)",
     )
+    parser.add_argument(
+        "--drop-stale-scans",
+        action="store_true",
+        default=False,
+        help="re-enable the C++ binary's drop-on-queue behavior. Default "
+        "off for benchmark runs so every scan is processed — observed 38%% "
+        "of KITTI-360 seq 2 scans were dropped with this on, missing many "
+        "revisits and producing high run-to-run variance.",
+    )
 
     # Benchmark-runner knobs.
     parser.add_argument("--publish-interval-sec", type=float, default=0.02)
@@ -88,6 +97,7 @@ def main() -> None:
         rgbd_proximity_path_max_neighbors=args.rgbd_proximity_path_max_neighbors,
         grid_cell_size=args.grid_cell_size,
         loop_min_id_gap=args.loop_min_id_gap,
+        drop_stale_scans=args.drop_stale_scans,
         debug=args.debug,
     )
 

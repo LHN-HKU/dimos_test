@@ -565,14 +565,13 @@ int main(int argc, char** argv) {
     // far-back ones that are the real loop closures.
     params["RGBD/ProximityMaxPaths"] =
         mod.arg("rgbd_proximity_max_paths", "0");
-    // Spatial search radius around the current keyframe — rtabmap default
-    // is 10m. KITTI-360 GT loops are within 4m, so 10m is theoretically
-    // enough; in practice rtabmap's optimized pose can drift a few meters
-    // post-loop-closure, so 20m gives a safety margin and meaningfully
-    // increases TP count without admitting more FPs (because the proximity
-    // path scan-matching ICP still has to converge).
+    // Spatial search radius around the current keyframe. KITTI-360's GT
+    // loop definition uses a 4m distance threshold, so 5m here keeps the
+    // candidate set aligned with GT geometry. Larger radii admit
+    // "spatially nearby but not a real revisit" pairs that ICP can still
+    // converge on, producing FPs against the benchmark.
     params["RGBD/LocalRadius"] =
-        mod.arg("rgbd_local_radius", "20");
+        mod.arg("rgbd_local_radius", "5");
     // Max pose-graph depth for proximity candidate search. Default 50;
     // raise this to find loop closures further back in the graph.
     params["RGBD/ProximityMaxGraphDepth"] =
