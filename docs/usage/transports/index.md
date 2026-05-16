@@ -52,7 +52,7 @@ On macOS, large replay workloads can be unreliable over LCM UDP. If Zenoh is ins
 
 Zenoh comes from the **`zenoh`** optional extra (`eclipse-zenoh`).
 
-Repo devs who run `uv sync --all-extras --no-extra dds` (`uv sync --all-extras --no-extra dds --no-extra cuda` on mac) (see [Developing on DimOS](/docs/installation/osx.md#developing-on-dimos)) already pull in **`zenoh`** among the extras, so no extra step.
+Repo devs who run `uv sync --all-extras --no-extra dds` (on macOS also `--no-extra cuda`; see [Developing on DimOS](/docs/installation/osx.md#developing-on-dimos) for optional `--frozen` with the checked-in lockfile) already pull in **`zenoh`** among the extras, so no extra step.
 
 Otherwise add only the Zenoh wheel (same constraint as the `zenoh` extra in `pyproject.toml`; does not edit `pyproject.toml`):
 
@@ -66,7 +66,7 @@ From a checkout, install the project editable with the optional group:
 uv pip install -e ".[zenoh]"
 ```
 
-Only use `uv sync --extra zenoh` when you intend to **sync the environment to default plus the `zenoh` extra only**; that can **uninstall** packages from other extras you used before. See the [macOS install page](/docs/installation/osx.md) if you rely on a wide optional set.
+Only use `` `uv sync --extra zenoh` `` when you intend to **sync the environment to default plus the `zenoh` extra only**; that can **uninstall** packages from other extras you used before. See the [macOS install page](/docs/installation/osx.md) if you rely on a wide optional set.
 
 **Default global stream transport** (only applies when you do not pass `--transport` or set `DIMOS_TRANSPORT`):
 

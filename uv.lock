@@ -2333,7 +2333,7 @@ requires-dist = [
     { name = "cupy-cuda12x", marker = "platform_machine == 'x86_64' and extra == 'cuda'", specifier = "==13.6.0" },
     { name = "cyclonedds", marker = "extra == 'dds'", specifier = ">=0.10.5" },
     { name = "cyclonedds", marker = "extra == 'unitree-dds'", specifier = ">=0.10.5" },
-    { name = "dimos", extras = ["agents", "apriltag", "base", "cpu", "cuda", "dev", "docker", "drone", "manipulation", "misc", "perception", "psql", "sim", "unitree", "visualization", "web", "zenoh"], marker = "extra == 'all'" },
+    { name = "dimos", extras = ["agents", "apriltag", "base", "cpu", "cuda", "docker", "drone", "manipulation", "misc", "perception", "psql", "sim", "unitree", "visualization", "web", "zenoh"], marker = "extra == 'all'" },
     { name = "dimos", extras = ["agents", "web", "visualization"], marker = "extra == 'base'" },
     { name = "dimos", extras = ["base"], marker = "extra == 'unitree'" },
     { name = "dimos", extras = ["unitree"], marker = "extra == 'unitree-dds'" },

@@ -313,7 +313,7 @@ apriltag = [
 ]
 
 all = [
-    "dimos[agents,apriltag,base,cpu,cuda,dev,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web,zenoh]",
+    "dimos[agents,apriltag,base,cpu,cuda,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web,zenoh]",
 ]
 
 [dependency-groups]
@@ -522,6 +522,8 @@ module = [
     "unitree_webrtc_connect.*",
     "websocket",
     "xarm.*",
+    "zenoh",
+    "zenoh.*",
     "ament_index_python.*",
 ]
 ignore_missing_imports = true
