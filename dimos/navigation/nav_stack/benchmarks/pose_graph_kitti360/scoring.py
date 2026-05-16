@@ -178,25 +178,28 @@ def _score_pairs(
     valid_loops_per_query: dict[int, set[int]],
 ) -> LoopMetrics:
     # All three counts are query-level so precision/recall stay
-    # dimensionally consistent. A query with N correct detections
-    # contributes 1 TP (not N): we only care whether each revisited
-    # frame got at least one matching edge.
-    false_positives = 0
+    # dimensionally consistent. The "query" of a detection pair is the
+    # later frame_id (matches the LCDNet convention). A query
+    # contributes 1 TP if any of its edges matched groundtruth,
+    # otherwise 1 FP. Duplicate detections for the same query collapse.
     seen_queries_with_hit: set[int] = set()
+    seen_queries_without_hit: set[int] = set()
     queries_with_any_groundtruth = {
         frame_id for frame_id, valid in valid_loops_per_query.items() if valid
     }
     for source_frame_id, target_frame_id in detected_pairs:
         source_valid = valid_loops_per_query.get(source_frame_id, set())
         target_valid = valid_loops_per_query.get(target_frame_id, set())
+        query_frame_id = max(source_frame_id, target_frame_id)
         if target_frame_id in source_valid or source_frame_id in target_valid:
-            seen_queries_with_hit.add(max(source_frame_id, target_frame_id))
+            seen_queries_with_hit.add(query_frame_id)
         else:
-            false_positives += 1
-    true_positives = len(seen_queries_with_hit)
-    false_negatives = len(queries_with_any_groundtruth - seen_queries_with_hit)
+            seen_queries_without_hit.add(query_frame_id)
+    # A query that fires both a TP and a FP edge is counted as TP only
+    # (one good detection is enough to say PGO recognised the place).
+    seen_queries_without_hit -= seen_queries_with_hit
     return LoopMetrics(
-        true_positive=true_positives,
-        false_positive=false_positives,
-        false_negative=false_negatives,
+        true_positive=len(seen_queries_with_hit),
+        false_positive=len(seen_queries_without_hit),
+        false_negative=len(queries_with_any_groundtruth - seen_queries_with_hit),
     )
