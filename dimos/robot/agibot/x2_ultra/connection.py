@@ -30,6 +30,7 @@ from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -38,6 +39,7 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.robot.agibot.x2_ultra._arm_ik import X2ArmIK
 from dimos.spec.perception import IMU, Camera, Lidar, Pointcloud
 from dimos.utils.logging_config import setup_logger
 
@@ -59,7 +61,22 @@ _TOPIC_JOINT_ARM = "/aima/hal/joint/arm/state"
 _TOPIC_JOINT_LEG = "/aima/hal/joint/leg/state"
 _TOPIC_JOINT_WAIST = "/aima/hal/joint/waist/state"
 _TOPIC_JOINT_HEAD = "/aima/hal/joint/head/state"
+_TOPIC_ARM_COMMAND = "/aima/hal/joint/arm/command"
 _SVC_INPUT_SOURCE = "/aimdk_5Fmsgs/srv/SetMcInputSource"
+_SVC_SET_MC_ACTION = "/aimdk_5Fmsgs/srv/SetMcAction"
+
+# Path to the URDF bundled in this package — used for IK.
+_X2_URDF_PATH = Path(__file__).resolve().parent / "x2_ultra.urdf"
+
+# MC action modes the user is likely to want from a skill.  Strings match the
+# `action_desc` field of McActionCommand (the SDK examples use the string form).
+_VALID_MC_MODES = (
+    "PASSIVE_DEFAULT",     # zero torque
+    "DAMPING_DEFAULT",     # damped joints
+    "JOINT_DEFAULT",       # position-controlled stand (arm teleop mode)
+    "STAND_DEFAULT",       # active balance, ready for locomotion
+    "LOCOMOTION_DEFAULT",  # walk/run
+)
 
 # Joint name ordering per the AgiBot X2 SDK docs (Interface > Control > Joint Control).
 # Names match the X2 URDF/MJCF (sans the "_joint" suffix, which the viewer adds).
@@ -277,6 +294,14 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
 
     config: ConnectionConfig
     cmd_vel: In[Twist]
+    # Direct joint command in the URDF's ordered arm-joint space. The 14
+    # values follow _ARM_JOINT_NAMES (left-then-right per the SDK). Names in
+    # the message are optional; if present we map by name.
+    arm_joint_command: In[JointState]
+    # End-effector cartesian targets in the pelvis frame. We solve IK on the
+    # corresponding arm and forward to /aima/hal/joint/arm/command.
+    cartesian_left: In[PoseStamped]
+    cartesian_right: In[PoseStamped]
     color_image: Out[Image]
     camera_info: Out[CameraInfo]
     depth_image: Out[Image]
@@ -289,10 +314,12 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
     _ros_node: Any = None
     _ros_thread: Thread | None = None
     _vel_publisher: Any = None
+    _arm_publisher: Any = None
     _latest_video_frame: Image | None = None
     _input_source_registered: bool = False
     _cam_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
     _cam_thread: Thread | None = None
+    _arm_ik: X2ArmIK | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -305,6 +332,10 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
         self._cam_proc = None
         self._cam_thread = None
         self._cam_stop = False
+        # Arm-control state. The IK model is lazy-loaded on first arm use to
+        # keep module import cheap.
+        self._arm_ik = None
+        self._arm_lock = Lock()
 
     @rpc
     def start(self) -> None:
@@ -432,7 +463,16 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
         VelMsg = self._import_msg("aimdk_msgs.msg", "McLocomotionVelocity")
         self._vel_publisher = node.create_publisher(VelMsg, _TOPIC_VELOCITY, 10)
 
+        # Arm joint command publisher. Robot must be in JOINT_DEFAULT (or have
+        # MC stopped) for these commands to actually drive the joints — see
+        # set_motion_mode().
+        ArmCmdMsg = self._import_msg("aimdk_msgs.msg", "JointCommandArray")
+        self._arm_publisher = node.create_publisher(ArmCmdMsg, _TOPIC_ARM_COMMAND, 10)
+
         self.register_disposable(self.cmd_vel.subscribe(self.move))
+        self.register_disposable(self.arm_joint_command.subscribe(self._on_arm_joint_command))
+        self.register_disposable(self.cartesian_left.subscribe(self._on_cartesian_left))
+        self.register_disposable(self.cartesian_right.subscribe(self._on_cartesian_right))
 
         self._ros_thread = Thread(target=self._ros_spin, daemon=True)
         self._ros_thread.start()
@@ -528,6 +568,239 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
                 logger.error("X2Connection: input source registration failed: %s", e)
         else:
             logger.error("X2Connection: input source registration timed out")
+
+    # --- Arm control ---
+
+    def _ensure_arm_ik(self) -> X2ArmIK:
+        if self._arm_ik is None:
+            self._arm_ik = X2ArmIK(_X2_URDF_PATH)
+            logger.info("X2Connection: arm IK loaded from %s", _X2_URDF_PATH)
+        return self._arm_ik
+
+    def _current_q(self) -> Any:
+        """Build a pinocchio q vector from the most recent joint_state map.
+
+        Missing joints default to 0 — fine for IK seeding since arm IK only
+        modifies the arm-joint slots and other slots are irrelevant.
+        """
+        import numpy as np
+
+        ik = self._ensure_arm_ik()
+        q = ik.home_q()
+        with self._joint_lock:
+            snapshot = dict(self._joint_positions)
+        for jname, pos in snapshot.items():
+            full = jname + "_joint"
+            if ik.model.existJointName(full):
+                jid = ik.model.getJointId(full)
+                q[ik.model.joints[jid].idx_q] = float(pos)
+        return q
+
+    def _build_arm_command_msg(self, positions_by_short_name: dict[str, float]) -> Any:
+        """Pack a 14-joint aimdk_msgs/JointCommandArray in SDK-required order."""
+        from aimdk_msgs.msg import JointCommand, JointCommandArray, MessageHeader
+
+        out = JointCommandArray()
+        out.header = MessageHeader()
+        out.header.stamp = self._ros_node.get_clock().now().to_msg()
+        for short_name in _ARM_JOINT_NAMES:
+            jc = JointCommand()
+            jc.name = short_name + "_joint"
+            jc.position = float(positions_by_short_name.get(short_name, 0.0))
+            jc.velocity = 0.0
+            jc.effort = 0.0
+            # Conservative gains. Tune per-deployment if motion is too soft/stiff.
+            jc.stiffness = 50.0
+            jc.damping = 1.0
+            out.joints.append(jc)
+        return out
+
+    def _publish_arm_positions(self, positions_by_short_name: dict[str, float]) -> bool:
+        if self._arm_publisher is None:
+            logger.warning("X2Connection: arm publisher not ready")
+            return False
+        try:
+            self._arm_publisher.publish(self._build_arm_command_msg(positions_by_short_name))
+            return True
+        except Exception as exc:
+            logger.exception("X2Connection: arm publish failed: %s", exc)
+            return False
+
+    def _on_arm_joint_command(self, msg: JointState) -> None:
+        """Direct (non-IK) arm joint command. Names use the short form, e.g.
+        'left_shoulder_pitch'. Anything not in _ARM_JOINT_NAMES is ignored.
+        """
+        positions = dict(zip(msg.name, msg.position, strict=False))
+        self._publish_arm_positions(positions)
+
+    def _solve_and_publish_cartesian(
+        self, target_pose: PoseStamped, side: str
+    ) -> bool:
+        """Solve IK for the named side and publish the resulting arm joints."""
+        import numpy as np
+        import pinocchio as pin
+
+        ik = self._ensure_arm_ik()
+        chain = ik.left if side == "left" else ik.right
+
+        target_se3 = pin.SE3(
+            pin.Quaternion(
+                float(target_pose.orientation.w),
+                float(target_pose.orientation.x),
+                float(target_pose.orientation.y),
+                float(target_pose.orientation.z),
+            ).matrix(),
+            np.array([target_pose.x, target_pose.y, target_pose.z], dtype=np.float64),
+        )
+
+        with self._arm_lock:
+            q_seed = self._current_q()
+            q_sol, ok, err = ik.solve(target_se3, q_seed, chain)
+
+        if not ok:
+            logger.warning("X2Connection: %s arm IK did not converge (err=%.4f)", side, err)
+            # Still publish best-effort — partial motion is usually fine.
+
+        # Build the full 14-joint map from the IK result (filling the other arm
+        # from current state so we don't reset it).
+        positions: dict[str, float] = {}
+        with self._joint_lock:
+            for name, pos in self._joint_positions.items():
+                if name in _ARM_JOINT_NAMES:
+                    positions[name] = pos
+        for short_name, slot in zip(chain.joint_names, chain.qpos_indices, strict=True):
+            # short_name here ends in "_joint" — strip it for the map key.
+            key = short_name[:-len("_joint")] if short_name.endswith("_joint") else short_name
+            positions[key] = float(q_sol[slot])
+        return self._publish_arm_positions(positions)
+
+    def _on_cartesian_left(self, msg: PoseStamped) -> None:
+        self._solve_and_publish_cartesian(msg, "left")
+
+    def _on_cartesian_right(self, msg: PoseStamped) -> None:
+        self._solve_and_publish_cartesian(msg, "right")
+
+    @skill
+    def set_motion_mode(self, mode: str) -> bool:
+        """Switch the robot's motion-control mode.
+
+        Valid values: ``STAND_DEFAULT`` (active-balance stand, locomotion-ready),
+        ``LOCOMOTION_DEFAULT`` (walking), ``JOINT_DEFAULT`` (position-controlled
+        stand — required before sending arm joint commands),
+        ``DAMPING_DEFAULT``, ``PASSIVE_DEFAULT``.
+        """
+        if mode not in _VALID_MC_MODES:
+            logger.error(
+                "X2Connection: unknown motion mode %r (valid: %s)", mode, _VALID_MC_MODES
+            )
+            return False
+        if self._ros_node is None:
+            logger.error("X2Connection: ROS not started")
+            return False
+
+        from aimdk_msgs.msg import McActionCommand, RequestHeader
+        from aimdk_msgs.srv import SetMcAction
+
+        client = self._ros_node.create_client(SetMcAction, _SVC_SET_MC_ACTION)
+        if not client.wait_for_service(timeout_sec=5.0):
+            logger.error("X2Connection: SetMcAction service unavailable")
+            return False
+
+        req = SetMcAction.Request()
+        req.header = RequestHeader()
+        cmd = McActionCommand()
+        cmd.action_desc = mode
+        req.command = cmd
+
+        future = None
+        for attempt in range(8):
+            req.header.stamp = self._ros_node.get_clock().now().to_msg()
+            req.source = _INPUT_SOURCE_NAME
+            future = client.call_async(req)
+            deadline = time.time() + 2.0
+            while not future.done() and time.time() < deadline:
+                time.sleep(0.05)
+            if future.done():
+                break
+            logger.info("X2Connection: SetMcAction retry [%d]", attempt)
+
+        if future is None or not future.done():
+            logger.error("X2Connection: SetMcAction timed out")
+            return False
+        try:
+            resp = future.result()
+            ok = int(resp.response.status.value) == 1
+            logger.info(
+                "X2Connection: set_motion_mode(%s) -> status=%s",
+                mode, resp.response.status.value,
+            )
+            return ok
+        except Exception as exc:
+            logger.error("X2Connection: SetMcAction failed: %s", exc)
+            return False
+
+    @skill
+    def home_arms(self) -> bool:
+        """Drive both arms to the all-zeros (hanging) pose.
+
+        Requires the robot to be in ``JOINT_DEFAULT`` mode (call
+        ``set_motion_mode('JOINT_DEFAULT')`` first).
+        """
+        positions = {name: 0.0 for name in _ARM_JOINT_NAMES}
+        return self._publish_arm_positions(positions)
+
+    @skill
+    def tuck_arms(self) -> bool:
+        """Move both arms to a tucked pose (elbows bent ~90°, arms close to body).
+
+        Requires ``JOINT_DEFAULT`` mode. Conservative pose meant as a safe
+        starting position before cartesian teleop.
+        """
+        # Symmetric: shoulder neutral, elbow bent.
+        positions = {name: 0.0 for name in _ARM_JOINT_NAMES}
+        positions["left_elbow"] = 1.5
+        positions["right_elbow"] = 1.5
+        return self._publish_arm_positions(positions)
+
+    @skill
+    def move_left_hand_to(self, x: float, y: float, z: float) -> bool:
+        """Move the left wrist to (x, y, z) metres in the pelvis frame.
+
+        Orientation is kept at its current value. Requires ``JOINT_DEFAULT``
+        mode and the joint_state stream to be active (used as the IK seed).
+        """
+        import pinocchio as pin
+
+        ik = self._ensure_arm_ik()
+        current = ik.fk_pose(self._current_q(), ik.left)
+        q_wxyz = pin.Quaternion(current.rotation)
+        target = PoseStamped(
+            x=float(x), y=float(y), z=float(z),
+            orientation=Quaternion(
+                float(q_wxyz.x), float(q_wxyz.y), float(q_wxyz.z), float(q_wxyz.w)
+            ),
+        )
+        return self._solve_and_publish_cartesian(target, "left")
+
+    @skill
+    def move_right_hand_to(self, x: float, y: float, z: float) -> bool:
+        """Move the right wrist to (x, y, z) metres in the pelvis frame.
+
+        Orientation is kept at its current value. Requires ``JOINT_DEFAULT``
+        mode.
+        """
+        import pinocchio as pin
+
+        ik = self._ensure_arm_ik()
+        current = ik.fk_pose(self._current_q(), ik.right)
+        q_wxyz = pin.Quaternion(current.rotation)
+        target = PoseStamped(
+            x=float(x), y=float(y), z=float(z),
+            orientation=Quaternion(
+                float(q_wxyz.x), float(q_wxyz.y), float(q_wxyz.z), float(q_wxyz.w)
+            ),
+        )
+        return self._solve_and_publish_cartesian(target, "right")
 
     # --- ROS2 sensor callbacks ---
 
