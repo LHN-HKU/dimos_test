@@ -14,30 +14,36 @@
 
 """Place-recognition AP evaluator for the Scan Context descriptor.
 
-This is the apples-to-apples comparison with published numbers like
-Scan Context (Kim & Kim 2018) AP=0.65-0.78 on KITTI-360 seq 02. It
-evaluates just the descriptor — no iSAM2, no ICP — so we measure
-descriptor discriminative power directly, the same way the reference
-papers do (LCDNet Protocol 1).
+A head-to-head comparison with the original Scan Context paper, which
+reports an AP of 0.65-0.78 on KITTI-360 sequence 02. We strip the SLAM
+pipeline back to just the place-recognition descriptor — no factor
+graph, no ICP refinement — so what we're measuring is whether the
+descriptor alone can tell "I've been here before" reliably. This is
+exactly how the academic papers run their numbers (the LCDNet Protocol
+1 setup), which is what makes our results directly comparable to theirs.
 
-For each query frame i (with i >= MIN_FRAME_GAP):
-    candidates = past frames in [0, i - MIN_FRAME_GAP]
-    1. ring-key kd-tree prefilter to top-K (default 10, matching Kim & Kim)
-    2. full column-shifted cosine distance against each candidate
-    3. top-1 candidate = argmin distance
-    is_true_positive[i]  = top-1's frame_id is within MAX_LOOP_DISTANCE_M of query
-    score[i]  = -top_match_distance  (high = confident match)
+The test itself works like this: walk through the trajectory frame by
+frame. For each frame, ask "out of every old frame I saw at least
+MIN_FRAME_GAP frames ago, which one looks the most like where I am
+right now?" We use a cheap ring-key kd-tree pre-filter to narrow the
+candidates down to the top 10 (matching Kim & Kim), then do a full
+column-shifted cosine match against those to pick the best one. It's a
+true positive if that best match was actually within MAX_LOOP_DISTANCE_M
+of the query, and the confidence score is the negated descriptor
+distance (high = confident match). Sweep the score threshold, plot
+precision vs. recall, integrate via
+``sklearn.metrics.average_precision_score`` and you get Average
+Precision — one number per sequence. We also print precision/recall at
+a few fixed thresholds for sanity.
 
-AP = sklearn.metrics.average_precision_score(is_true_positive, score). Sweeps the
-threshold implicitly. Also reports precision/recall at a few specific
-thresholds for reference.
-
-The Python descriptor matches cpp/scan_context.cpp exactly: same
-polar binning, same lidar_height_m=2.0 shift, same column-cosine
-distance over all sector shifts.
+One important detail: the Python descriptor used here is a faithful
+copy of ``cpp/scan_context.cpp`` — same polar bins, same
+``lidar_height_m=2.0`` shift, same column-cosine distance over all
+sector shifts. So we're measuring the real descriptor, not a clean-room
+reimplementation that might quietly disagree.
 
 Usage:
-    uv run python -m dimos.navigation.nav_stack.modules.pgo.place_recognition_ap \\
+    uv run python -m dimos.navigation.nav_stack.modules.pgo.benchmark_place_recognition \\
         --kitti360-root ~/datasets/kitti360 --sequence 2
 """
 

@@ -88,11 +88,7 @@ class PGO(NativeModule):
     odometry: In[Odometry]
     corrected_odometry: Out[Odometry]
     global_map: Out[PointCloud2]
-    # map→odom drift correction the C++ binary emits as an Odometry. The
-    # Python side subscribes to its own output and re-publishes through
-    # ``self.tf`` (ModuleBase's TF system) so the rest of the stack picks
-    # it up via the normal TF channel. The field can't be called ``tf``
-    # because that name is reserved by ``ModuleBase``.
+    # NOTE: this corrected_tf gets refactored-out in the next PR
     corrected_tf: Out[Odometry]
     pose_graph_nodes: Out[NavPath]
     pose_graph_edges: Out[NavPath]

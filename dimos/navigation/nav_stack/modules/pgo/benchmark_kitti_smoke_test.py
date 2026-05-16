@@ -33,7 +33,7 @@ from reactivex.disposable import Disposable
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
-from dimos.core.module import Module, ModuleConfig
+from dimos.core.module import Module
 from dimos.core.stream import In
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path as NavPath
@@ -44,14 +44,8 @@ from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.playback import (
 from dimos.navigation.nav_stack.modules.pgo.pgo import PGO
 
 
-class TopicCounterConfig(ModuleConfig):
-    pass
-
-
 class TopicCounterModule(Module):
     """Subscribes to every PGO output stream and counts arrivals per topic."""
-
-    config: TopicCounterConfig
 
     corrected_odometry: In[Odometry]
     global_map: In[PointCloud2]
