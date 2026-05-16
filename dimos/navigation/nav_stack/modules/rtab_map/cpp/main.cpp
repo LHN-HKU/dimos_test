@@ -613,8 +613,12 @@ int main(int argc, char** argv) {
         mod.arg("icp_correspondence_ratio", "0.02");
     // Voxel-downsample the laser scan in Memory before ICP runs. Default
     // 0 (no downsampling) makes ICP eat the full 80k-point KITTI scan
-    // each iteration. 0.2m voxel gets the scan to ~5-10k points with
-    // negligible accuracy loss for proximity matching.
+    // each iteration. 0.2 m voxel gets the scan to ~5-10k points with
+    // negligible accuracy loss for proximity matching. Larger voxels
+    // (e.g. 0.5 m) speed up ICP but collapse precision — at 0.5 m we
+    // observed FPs jump from ~9 to 252 because under-sampled scans pass
+    // the correspondence-ratio gate against geometrically-distinct
+    // places that happen to share coarse structure.
     params["Mem/LaserScanVoxelSize"] =
         mod.arg("mem_laser_scan_voxel_size", "0.2");
     params["Mem/LaserScanNormalK"] =
