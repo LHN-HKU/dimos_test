@@ -53,6 +53,9 @@ class RayTracingVoxelMapConfig(NativeModuleConfig):
     ray_subsample: int = 1
     # Extend rays past the end point to clear shadows
     shadow_depth: float = 0.2
+    # Bounds for the health of voxels. Positive health means voxel is occupied.
+    min_health: int = -1
+    max_health: int = 1
 
 
 class RayTracingVoxelMap(NativeModule, mapping.GlobalPointcloud):
