@@ -556,6 +556,15 @@ int main(int argc, char** argv) {
     // default in rtabmap, but explicit here so it's tunable.
     params["RGBD/ProximityBySpace"] =
         mod.arg("rgbd_proximity_by_space", "true");
+    // Max number of spatial paths to ICP-check per process call. rtabmap
+    // defaults to 3 and sorts paths by visual-likelihood-then-id. With
+    // visual BoW off (Kp/DetectorStrategy=-1) all likelihoods are 0, so
+    // ranking falls to id-descending — the 3 most recent. That's
+    // trajectory-smoothing, not loop closure. Set to 0 (no cap) so the
+    // proximity ICP gets to try every spatial candidate, including the
+    // far-back ones that are the real loop closures.
+    params["RGBD/ProximityMaxPaths"] =
+        mod.arg("rgbd_proximity_max_paths", "0");
     // Spatial search radius around the current keyframe — rtabmap default
     // is 10m. For KITTI-360-style outdoor scenes with 4m GT loops, this is
     // already generous; for tight indoor use, drop to 2-3m.
@@ -756,6 +765,15 @@ int main(int argc, char** argv) {
     // process every scan as a keyframe — only useful for synthetic tests.
     const double rtabmap_process_period =
         std::stod(mod.arg("rtabmap_process_period", "0.5"));
+    // Optional minimum signature-ID gap between current and detected
+    // loop target before we publish the edge. rtabmap's proximity-ICP
+    // routinely matches against the keyframe just past STM (~10 ids
+    // back) as a trajectory-smoothing add — useful for the graph but
+    // semantically "not a loop closure" for benchmarks. Set non-zero
+    // to drop those; 0 (default) keeps every detection. The KITTI scorer
+    // requires gap >= 50 to count as a GT loop, so for that benchmark
+    // 30+ is a sensible filter.
+    const int loop_min_id_gap = std::stoi(mod.arg("loop_min_id_gap", "0"));
 
     double last_octomap_publish = 0.0;
     double last_global_map_publish = 0.0;
@@ -858,12 +876,21 @@ int main(int argc, char** argv) {
         //   * statistics.proximityDetectionId() — spatial proximity (ICP)
         // In lidar-only mode the visual path is disabled (Kp/DetectorStrategy
         // = -1), so all real loop closures come through the proximity path.
-        // Treat either as "loop closure detected" and publish the edge.
+        // Treat either as "loop closure detected".
+        //
+        // Filter by signature-ID gap before publishing: rtabmap's proximity
+        // path adds ICP edges to keyframes ~10 ids behind current (just out
+        // of STM) as trajectory-smoothing — those aren't real revisits in
+        // the KITTI-360 GT sense (min frame gap 50). `loop_min_id_gap` lets
+        // the caller require a minimum gap; default 30 keeps the "loop
+        // closure" semantic distinct from the proximity-smoothing edges.
         if (processed) {
             const int loop_id = rtab.getLoopClosureId();
             const int prox_id = static_cast<int>(rtab.getStatistics().proximityDetectionId());
             const int target_id = loop_id > 0 ? loop_id : prox_id;
-            if (target_id > 0) {
+            const int curr_loc_id = rtab.getLastLocationId();
+            const bool gap_ok = (curr_loc_id - target_id) >= loop_min_id_gap;
+            if (target_id > 0 && gap_ok) {
                 const int loop_id_publish = target_id;
                 const rtabmap::Memory* mem = rtab.getMemory();
                 const int curr_id = rtab.getLastLocationId();
