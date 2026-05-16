@@ -89,7 +89,14 @@ def main() -> None:
     # Benchmark-runner knobs.
     parser.add_argument("--publish-interval-sec", type=float, default=0.02)
     parser.add_argument("--drain-sec", type=float, default=10.0)
-    parser.add_argument("--output-json", type=Path, default=None)
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=Path(__file__).resolve().parent / "benchmark_kitti360.json",
+        help="write the benchmark JSON results here. Defaults to "
+        "benchmark_kitti360.json next to this script — overwritten on every "
+        "run so the latest score is always at a stable path.",
+    )
     args = parser.parse_args()
 
     rtab_blueprint = RtabMap.blueprint(
