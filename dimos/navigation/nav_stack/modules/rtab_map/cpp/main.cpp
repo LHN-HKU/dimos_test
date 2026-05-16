@@ -566,10 +566,13 @@ int main(int argc, char** argv) {
     params["RGBD/ProximityMaxPaths"] =
         mod.arg("rgbd_proximity_max_paths", "0");
     // Spatial search radius around the current keyframe — rtabmap default
-    // is 10m. For KITTI-360-style outdoor scenes with 4m GT loops, this is
-    // already generous; for tight indoor use, drop to 2-3m.
+    // is 10m. KITTI-360 GT loops are within 4m, so 10m is theoretically
+    // enough; in practice rtabmap's optimized pose can drift a few meters
+    // post-loop-closure, so 20m gives a safety margin and meaningfully
+    // increases TP count without admitting more FPs (because the proximity
+    // path scan-matching ICP still has to converge).
     params["RGBD/LocalRadius"] =
-        mod.arg("rgbd_local_radius", "10");
+        mod.arg("rgbd_local_radius", "20");
     // Max pose-graph depth for proximity candidate search. Default 50;
     // raise this to find loop closures further back in the graph.
     params["RGBD/ProximityMaxGraphDepth"] =
@@ -589,21 +592,24 @@ int main(int argc, char** argv) {
         mod.arg("icp_max_correspondence_distance", "0.5");
     // ICP transform-validity gates relative to the proximity guess. rtabmap
     // defaults are 0.2m / 0.78rad — tuned for desktop / hand-held RGBD.
-    // Outdoor LiDAR loop closures (KITTI-360) routinely produce 0.5-4m
-    // corrections in lateral / vertical position, so loosen these to
-    // KITTI-scale. With the tight defaults rtabmap rejected 100% of
-    // proximity ICP attempts ("libpointmatcher has failed: limit out of
-    // bounds: rot: 0.04/0.78 tr: 0.48/0.2").
+    // Outdoor LiDAR loop closures (KITTI-360) routinely produce 0.5-6m
+    // corrections, so loosen to KITTI-scale. Tighter than this means
+    // valid proximity ICP transforms get rejected; looser starts to
+    // admit alignments to spatially-near-but-wrong nodes.
     params["Icp/MaxTranslation"] =
         mod.arg("icp_max_translation", "5.0");
     params["Icp/MaxRotation"] =
         mod.arg("icp_max_rotation", "1.5");
     // Min fraction of points that must find a correspondence for ICP
     // to be considered a valid match. rtabmap default 0.2 (20%) is far
-    // too strict for outdoor lidar where the two scans cover different
-    // halves of the environment — we observed 2-5% on KITTI-360. Drop
-    // to 0.01 (1%) which is more forgiving but still flags totally-
-    // mismatched scans.
+    // too strict for outdoor lidar.
+    //
+    // LOAD-BEARING: Memory.cpp:157 doubles this value when constructing
+    // the proximity-multi-scan RegistrationIcp ("corRatio*2.0f"). So
+    // the effective threshold at the loop-closure check is 2× what we
+    // set here. With 0.01 set, the proximity threshold is 0.02 — empirically
+    // the precision/recall sweet spot for KITTI-360 seq 2 (smaller
+    // values admit FPs without recovering TPs).
     params["Icp/CorrespondenceRatio"] =
         mod.arg("icp_correspondence_ratio", "0.01");
     // Voxel-downsample the laser scan in Memory before ICP runs. Default
