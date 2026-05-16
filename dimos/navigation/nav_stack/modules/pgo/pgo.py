@@ -34,6 +34,9 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
+# HACK: TODO: switch to wait-for-ready system. Currently this is a blind sleep
+# to let the C++ subprocess's LCM subscriptions join the multicast group before
+# upstream modules start publishing scans.
 _STARTUP_SETTLE_SEC = 0.3
 
 
@@ -101,11 +104,6 @@ class PGO(NativeModule):
     @rpc
     def start(self) -> None:
         super().start()
-        # Brief settle so the C++ subprocess's LCM subscriptions join the
-        # multicast group before upstream modules begin publishing scans.
-        # Without this, early scans can be missed and scan-context loops
-        # don't trigger reliably.
-        # TODO: switch to wait-for-ready system
         time.sleep(_STARTUP_SETTLE_SEC)
         if self.config.debug:
             logger.info("PGO native module started (C++ iSAM2 + PCL ICP)")
