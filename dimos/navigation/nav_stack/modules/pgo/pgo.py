@@ -30,7 +30,10 @@ from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.GraphNodes3D import GraphNodes3D
+from dimos.msgs.nav_msgs.LineSegments3D import LineSegments3D
 from dimos.msgs.nav_msgs.Odometry import Odometry
+from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.frames import FRAME_MAP, FRAME_ODOM
 from dimos.utils.logging_config import setup_logger
@@ -77,6 +80,9 @@ class PGO(NativeModule):
     corrected_odometry: Out[Odometry]
     global_map: Out[PointCloud2]
     pgo_tf: Out[Odometry]
+    pgo_graph_nodes: Out[GraphNodes3D]
+    pgo_graph_edges: Out[LineSegments3D]
+    pgo_loop_closure: Out[NavPath]
 
     @rpc
     def start(self) -> None:
