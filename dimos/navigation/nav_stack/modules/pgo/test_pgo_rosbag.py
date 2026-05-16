@@ -45,7 +45,7 @@ _POST_FEED_DRAIN_SEC = 3.0
 
 PGO_BIN = Path(__file__).parent / "cpp" / "result" / "bin" / "pgo"
 
-# LCM topic names for this test (prefixed to avoid collision)
+# TODO: use modules rather than LCM directly
 SCAN_LCM = "/rb_test_scan#sensor_msgs.PointCloud2"
 ODOM_LCM = "/rb_test_odom#nav_msgs.Odometry"
 CORRECTED_ODOM_LCM = "/rb_test_corr_odom#nav_msgs.Odometry"

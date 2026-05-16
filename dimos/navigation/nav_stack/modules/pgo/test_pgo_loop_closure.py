@@ -57,6 +57,7 @@ pytestmark = [pytest.mark.slow]
 
 PGO_BIN = Path(__file__).parent / "cpp" / "result" / "bin" / "pgo"
 
+# TODO: use modules rather than LCM directly
 SCAN_LCM = "/lc_test_scan#sensor_msgs.PointCloud2"
 ODOM_LCM = "/lc_test_odom#nav_msgs.Odometry"
 CORRECTED_ODOM_LCM = "/lc_test_corrected#nav_msgs.Odometry"
