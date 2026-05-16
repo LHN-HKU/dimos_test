@@ -233,8 +233,6 @@ def nav_stack_rerun_config(
         visual_override.setdefault("world/contour_polygons", _contour_polygons_colors_debug)
         visual_override.setdefault("world/graph_nodes", _graph_nodes_colors_debug)
         visual_override.setdefault("world/graph_edges", _graph_edges_colors_debug)
-        visual_override.setdefault("world/pgo_graph_nodes", _pgo_graph_nodes_colors_debug)
-        visual_override.setdefault("world/pgo_graph_edges", _pgo_graph_edges_colors_debug)
     else:
         visual_override.setdefault("world/way_point", _waypoint_colors)
         visual_override.setdefault("world/goal", _goal_colors)
