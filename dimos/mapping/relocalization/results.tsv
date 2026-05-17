@@ -57,3 +57,4 @@ ddc3eb6	0.9310	0.033	0.607	64.4	discard	drop yaw-flip variant; lost frame 2153 â
 c8c9722	0.9636	0.029	0.370	56.5	discard	RANSAC restarts 7->6; lost 2 frames
 48ccc40	0.9818	0.029	0.250	53.7	discard	RANSAC iters 500k->250k; lost frame 1435 (yaw flip)
 260fdc6	0.9636	0.029	0.355	58.0	discard	RANSAC iters 500k->400k; lost 2 frames
+c88923b	1.0000	0.029	0.079	56.2	keep	drop 0.5m voxel; 3-scale [0.2,0.3,0.8] same accuracy, -4.4s
