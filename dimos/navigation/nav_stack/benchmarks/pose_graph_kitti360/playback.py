@@ -61,9 +61,6 @@ class Kitti360PlaybackModule(Module):
 
     registered_scan: Out[PointCloud2]
     odometry: Out[Odometry]
-    # Subscribed only so we can detect when the consumer (any LoopClosure
-    # SLAM) has come up and processed the first scan — see _run_playback's
-    # "wait for first response" gate.
     corrected_odometry: In[Odometry]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -116,10 +113,6 @@ class Kitti360PlaybackModule(Module):
 
                 self._frames_published = index + 1
                 if index == 0:
-                    # Wait for the consumer (any LoopClosure SLAM) to echo
-                    # back via corrected_odometry so we don't flood it with
-                    # the rest of the trajectory before it has finished
-                    # starting up.
                     try:
                         await asyncio.wait_for(
                             self._first_response_event.wait(),
