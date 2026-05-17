@@ -196,6 +196,7 @@ def relocalize(
     # Stage 2: run a moderate-distance ICP on each top-10 on WALL clouds.
     # Wall correspondences drive yaw and xy; the rerank then picks the
     # candidate whose walls actually align (not the one whose floors agree).
+    tukey = _reg.TransformationEstimationPointToPlane(_reg.TukeyLoss(k=RERANK_DIST))
     polished: list[tuple[float, np.ndarray]] = []
     for T0 in top_k:
         r = _reg.registration_icp(
@@ -203,7 +204,7 @@ def relocalize(
             tgt_walls,
             RERANK_DIST,
             T0,
-            _reg.TransformationEstimationPointToPlane(),
+            tukey,
             _reg.ICPConvergenceCriteria(max_iteration=100),
         )
         polished.append((float(r.fitness), np.asarray(r.transformation)))
