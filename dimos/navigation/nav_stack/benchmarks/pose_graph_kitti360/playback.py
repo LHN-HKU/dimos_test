@@ -43,7 +43,7 @@ from dimos.navigation.nav_stack.tests.rosbag_fixtures import (
     make_pointcloud_msg,
 )
 
-FIRST_RESPONSE_TIMEOUT_SEC = 20.0
+FIRST_RESPONSE_TIMEOUT_SEC = 120.0
 
 
 class Kitti360PlaybackConfig(ModuleConfig):

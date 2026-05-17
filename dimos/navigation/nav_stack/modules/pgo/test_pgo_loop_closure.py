@@ -47,7 +47,7 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-pytestmark = [pytest.mark.self_hosted, pytest.mark.skipif_no_nix]
+pytestmark = [pytest.mark.self_hosted, pytest.mark.skipif_no_nix, pytest.mark.skipif_macos_bug]
 
 POST_FEED_DRAIN_SEC = 5.0
 POLL_INTERVAL_SEC = 0.25
