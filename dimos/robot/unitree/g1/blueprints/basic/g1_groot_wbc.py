@@ -504,13 +504,22 @@ def _workspace_camera_bridge_blueprint() -> Blueprint | None:
     # forward camera (it deduplicates by class, not instance).
     from dimos.hardware.sensors.camera.tcp_jpeg import WorkspaceTcpJpegCameraModule
 
-    return WorkspaceTcpJpegCameraModule.blueprint(
-        host=host,
-        port=_env_int("DIMOS_ROBOT_WORKSPACE_CAMERA_PORT", 5001),
-    ).transports(
-        {
-            ("video", Image): LCMTransport("/workspace_image", Image),
-        }
+    # Remap the inherited ``video`` stream to ``video_workspace`` so the
+    # autoconnect transport dict — keyed globally by (stream_name, type) —
+    # doesn't collide with the forward TcpJpegCameraModule's ``video`` Out.
+    # Without this remap the last-merged transport wins and BOTH cameras end
+    # up publishing to /workspace_image.
+    return (
+        WorkspaceTcpJpegCameraModule.blueprint(
+            host=host,
+            port=_env_int("DIMOS_ROBOT_WORKSPACE_CAMERA_PORT", 5001),
+        )
+        .remappings([(WorkspaceTcpJpegCameraModule, "video", "video_workspace")])
+        .transports(
+            {
+                ("video_workspace", Image): LCMTransport("/workspace_image", Image),
+            }
+        )
     )
 
 

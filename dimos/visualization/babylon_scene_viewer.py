@@ -1936,8 +1936,14 @@ _HTML = r"""<!doctype html>
       });
 
       window.addEventListener("blur", () => {
+        // Clear any keys the user was holding when the window lost focus
+        // so we don't keep walking on alt-tab. Only publish a stop if drive
+        // was actually engaged — otherwise we'd send a spurious zero Twist
+        // on every page refresh, which clobbers whatever cmd_vel source
+        // is currently driving the robot (Quest joysticks, an agent, etc.)
+        // for one tick and shows up as the robot going briefly damp.
         pressedKeys.clear();
-        sendDriveCommand(true);
+        if (driveEnabled) sendDriveCommand(true);
       });
 
       function renderFrame() {
