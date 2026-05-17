@@ -100,11 +100,6 @@ class NativeModuleConfig(ModuleConfig):
     shutdown_timeout: float = DEFAULT_THREAD_JOIN_TIMEOUT
     log_format: LogFormat = LogFormat.TEXT
     auto_build: bool = False
-    # How long start() blocks waiting for the subprocess to emit
-    # "[DIMOS_NATIVE_READY]" on stderr. Default 0 = no wait (legacy binaries
-    # that don't emit the marker). Subclasses whose binaries emit the marker
-    # should bump this to ~10s. See NativeModule.start.
-    ready_timeout_sec: float = 0.0
 
     # New version of Native Modules read json configs from stdin
     # Enable this to read from stdin instead of cli args
@@ -113,38 +108,18 @@ class NativeModuleConfig(ModuleConfig):
     cli_exclude: frozenset[str] = frozenset()
     cli_name_override: dict[str, str] = Field(default_factory=dict)
 
-    def _native_ignore_fields(self) -> set[str]:
-        """Inherited NativeModuleConfig fields *not* redeclared in any subclass.
-
-        A subclass that redeclares an inherited field (e.g. ``frame_id``) is
-        signalling it wants that field exposed — usually as a CLI arg or
-        stdin config entry — so we don't filter it out. Fields declared
-        directly on NativeModuleConfig (``executable``, ``cwd``, ...) configure
-        the wrapper itself and stay ignored even when redeclared to override
-        defaults.
-        """
-        ignore = set(NativeModuleConfig.model_fields)
-        wrapper_only = set(NativeModuleConfig.__annotations__)
-        for klass in self.__class__.__mro__:
-            if klass is NativeModuleConfig:
-                break
-            for field in getattr(klass, "__annotations__", {}):
-                if field not in wrapper_only:
-                    ignore.discard(field)
-        return ignore
-
     def to_config_dict(self) -> dict[str, Any]:
         """
         Return module-specific config fields as a plain dict (for stdin JSON).
         """
-        ignore_fields = self._native_ignore_fields()
+        ignore_fields = set(NativeModuleConfig.model_fields)
         return {
             k: v for k, v in self.model_dump().items() if k not in ignore_fields and v is not None
         }
 
     def to_cli_args(self) -> list[str]:
         """Convert subclass config fields to CLI args (--name value)."""
-        ignore_fields = self._native_ignore_fields()
+        ignore_fields = {f for f in NativeModuleConfig.model_fields if f != "frame_id"}
         args: list[str] = []
         for f in self.__class__.model_fields:
             if f in ignore_fields:
@@ -188,7 +163,6 @@ class NativeModule(Module):
     _watchdog: threading.Thread | None = None
     _stopping: bool = False
     _stop_lock: threading.Lock
-    _ready_event: threading.Event
 
     @functools.cached_property
     def _module_label(self) -> str:
@@ -198,7 +172,6 @@ class NativeModule(Module):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._stop_lock = threading.Lock()
-        self._ready_event = threading.Event()
 
         if self.config.cwd is not None and not Path(self.config.cwd).is_absolute():
             base_dir = Path(inspect.getfile(type(self))).resolve().parent
@@ -208,6 +181,10 @@ class NativeModule(Module):
 
     @rpc
     def build(self) -> None:
+        # Heavy one-time work (cargo/cmake/nix builds, LFS) belongs in build(),
+        # not start(). Running it in start() blocks Popen and lets upstream
+        # publishers pump messages before the subprocess's LCM subscriptions
+        # are live, which causes flaky data loss in tests.
         super().build()
         self._maybe_build()
 
@@ -264,42 +241,15 @@ class NativeModule(Module):
             pid=self._process.pid,
         )
 
-        self._ready_event.clear()
         watchdog = threading.Thread(
             target=self._watch_process,
             daemon=True,
             name=f"native-watchdog-{self._module_label}",
         )
-        # Capture proc before launching the watchdog — if the subprocess dies,
-        # the watchdog calls stop() which nulls out self._process and this loop
-        # would crash otherwise.
-        proc = self._process
         with self._stop_lock:
             self._stopping = False
             self._watchdog = watchdog
         watchdog.start()
-
-        # Block until the subprocess emits [DIMOS_NATIVE_READY] on stderr, or
-        # the timeout fires. The watchdog's stderr reader sets _ready_event
-        # when it sees the marker. If the subprocess exits before that, drop
-        # out and let the watchdog handle the cleanup — start() always
-        # returns; failures surface later via the watchdog's stop() path.
-        if self.config.ready_timeout_sec > 0:
-            deadline = time.monotonic() + self.config.ready_timeout_sec
-            while not self._ready_event.is_set():
-                if proc.poll() is not None:
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    logger.warning(
-                        "Native process did not emit [DIMOS_NATIVE_READY] within "
-                        f"{self.config.ready_timeout_sec}s — proceeding anyway. "
-                        "Upstream publishers may race the subprocess's LCM subscribes.",
-                        module=self._module_label,
-                        pid=proc.pid,
-                    )
-                    break
-                self._ready_event.wait(timeout=min(remaining, 0.5))
 
     @rpc
     def stop(self) -> None:
