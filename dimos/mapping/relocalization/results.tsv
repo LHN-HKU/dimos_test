@@ -47,3 +47,4 @@ bc5c53c	0.8448	0.033	1.134	64.4	discard	consensus selection over polished top-10
 48f77b2	0.9483	0.033	0.663	68.7	discard	FGR-per-scale candidate aug; tied success+median, +3s; FGR candidates lost in rerank
 85f1959	0.8966	0.032	0.887	65.4	discard	score by min(loose, tight) wall fitness; min reduces to tight when tight always lower; same as tight-only discard
 904982d	0.9138	0.034	0.676	56.0	discard	mutual_filter=False; broke 1292, 1579 — non-mutual matches gave wrong candidates
+5775fd4	0.9310	0.029	0.787	67.1	discard	GICP polish; lost frame 1292 (basin shifted to yaw flip)
