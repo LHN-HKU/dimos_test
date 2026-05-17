@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MuJoCo-based robot mesh extractor + FK helper for the Viser viewer.
+"""MuJoCo-based robot mesh extractor and FK helper for browser viewers.
 
 Loads an MJCF (the same one the sim subprocess loads), pulls out visual
 mesh geoms with their parent-body indices and local poses, and runs FK
 on demand to give world poses for every body in the model.
 
-Lets the Viser render module display the same robot the simulation is
-stepping, without forcing a separate URDF or duplicating geometry.
+Lets a browser render module display the same robot the simulation is
+stepping without forcing a separate URDF or duplicating geometry.
 """
 
 from __future__ import annotations
@@ -54,8 +54,25 @@ class RobotMeshes:
     # joint-name (in MJCF order) -> qpos address.  Used to splice incoming
     # joint_state values into the right slots of qpos.
     qpos_addr_by_mjcf_name: dict[str, int]
-    # body_id -> body name (for viser entity paths).
+    # body_id -> body name for browser entity paths.
     body_names: list[str]
+
+
+def apply_robot_state(
+    robot: RobotMeshes,
+    base_pos: np.ndarray | None,
+    base_wxyz: np.ndarray | None,
+    joint_positions: dict[str, float],
+) -> None:
+    if base_pos is not None:
+        robot.data.qpos[0:3] = base_pos
+    if base_wxyz is not None:
+        robot.data.qpos[3:7] = base_wxyz
+    for name, qpos in joint_positions.items():
+        adr = robot.qpos_addr_by_mjcf_name.get(name)
+        if adr is not None:
+            robot.data.qpos[adr] = qpos
+    mujoco.mj_kinematics(robot.model, robot.data)
 
 
 def load_robot_meshes(

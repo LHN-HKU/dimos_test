@@ -98,8 +98,8 @@ unitree_g1_nav_sim_pimsim = (
     )
     .remappings(
         [
-            # Route the synthetic lidar into the viewer's point-cloud overlay
-            # so you can see what mj_ray is actually hitting.
+            # Route synthetic lidar into the viewer overlay so raycast hits
+            # are visible while testing navigation.
             (BabylonSceneViewerModule, "pointcloud_overlay", "registered_scan"),
             (MovementManager, "way_point", "_mgr_way_point_unused"),
         ]

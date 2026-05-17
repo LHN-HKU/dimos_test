@@ -16,14 +16,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-import math
-import mimetypes
 from pathlib import Path
 import threading
 import time
-from typing import Any, Protocol
+from typing import Any
 
-import mujoco
 import numpy as np
 from reactivex.disposable import Disposable
 from starlette.applications import Starlette
@@ -35,13 +32,37 @@ import uvicorn
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
-from dimos.core.module import Module, ModuleConfig
+from dimos.core.module import Module
 from dimos.core.stream import In, Out
-from dimos.experimental.pimsim.robot_meshes import RobotMeshes, load_robot_meshes
+from dimos.experimental.pimsim.browser import HTML
+from dimos.experimental.pimsim.config import (
+    BabylonSceneViewerConfig,
+    CoordinatorControlSpec,
+    HumanoidControlSpec,
+    MujocoRespawnSpec,
+)
+from dimos.experimental.pimsim.geometry import (
+    WS_MSG_CAMERA,
+    canonical_joint_name,
+    compose_scene_mesh_wxyz,
+    dimos_joint_to_mjcf,
+    media_type,
+    path_contains,
+)
+from dimos.experimental.pimsim.kinematic import KinematicBaseSim
+from dimos.experimental.pimsim.lidar import (
+    MujocoRaycastScene,
+    RaycastScene,
+    SyntheticLidar,
+    SyntheticLidarConfig,
+)
+from dimos.experimental.pimsim.robot_meshes import (
+    RobotMeshes,
+    apply_robot_state,
+    load_robot_meshes,
+)
 from dimos.msgs.geometry_msgs.PointStamped import PointStamped
-from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
@@ -50,144 +71,9 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.visualization_msgs.EntityMarkers import EntityMarkers, Marker
-from dimos.simulation.scenes import SceneAsset
-from dimos.spec.utils import Spec
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
-
-# Binary websocket message tag for a camera frame.
-_WS_MSG_CAMERA = 0x01
-
-
-# DimOS joint names look like ``g1/left_hip_pitch`` (slash-separated hardware
-# id + snake_case suffix); MJCF joint names look like ``left_hip_pitch_joint``.
-def _dimos_joint_to_mjcf(name: str) -> str:
-    parts = name.split("/", 1)
-    suffix = parts[1] if len(parts) > 1 else parts[0]
-    return f"{suffix}_joint"
-
-
-class BabylonSceneViewerConfig(ModuleConfig):
-    """Configuration for the in-process Babylon viewer / kinematic sim.
-
-    All runtime-tunable knobs live here so the global_config / CLI can
-    override them. ``assets`` (an in-memory dict of mesh bytes) is passed
-    via ``__init__`` instead because it isn't config-serializable.
-    """
-
-    # MJCF model path for the robot. Required.
-    mjcf_path: str = ""
-
-    # HTTP port for the viewer page + websocket.
-    port: int = 8091
-
-    # World scene to render around the robot. None = no scene, robot floats
-    # in void. Use `dimos.simulation.scenes.get_dimos_office()` etc.
-    scene: SceneAsset | None = None
-
-    # Skip serving the scene mesh entirely (~340 MB for the office). Useful
-    # when you only need the robot + cmd_vel sandbox and want a fast load.
-    disable_scene: bool = False
-
-    # Broadcast / encoding rates.
-    broadcast_hz: float = 20.0
-    pointcloud_hz: float = 2.0
-    pointcloud_max_points: int = 70000
-    camera_hz: float = 15.0
-    camera_jpeg_quality: int = 75
-    camera_name: str = "camera"
-
-    # Kinematic sim — when enable_sim=True, the module integrates incoming
-    # cmd_vel into pose, publishes odometry, and drives the viewer's base
-    # directly. Mirrors UnityBridgeModule so this is a drop-in replacement.
-    enable_sim: bool = True
-    sim_rate: float = 200.0
-    vehicle_height: float = 0.75
-    init_x: float = 0.0
-    init_y: float = 0.0
-    init_z: float = 0.0
-    init_yaw: float = 0.0
-    lock_z: bool = False
-
-    # Synthetic lidar — raycasts against the loaded MJCF (robot + ground +
-    # any scene geometry compiled into the model). Set lidar_hz=0 to disable.
-    lidar_hz: float = 10.0
-    lidar_n_azimuth: int = 360
-    lidar_n_elevation: int = 16
-    lidar_elevation_min_deg: float = -22.5
-    lidar_elevation_max_deg: float = 22.5
-    lidar_max_range: float = 30.0
-    lidar_z_offset: float = 1.2
-
-
-class MujocoRespawnSpec(Spec, Protocol):
-    def respawn(self) -> bool: ...
-
-
-class HumanoidControlSpec(Spec, Protocol):
-    """Optional spec implemented by humanoid robot adapters.
-
-    Auto-wired into the viewer so the per-joint arm sliders in the HUD can
-    drive each joint within its declared limits. Stays robot-agnostic — any
-    humanoid that knows its own joint range can implement it.
-    """
-
-    def set_arm_joint(self, name: str, position: float) -> bool: ...
-    def release_arms(self) -> bool: ...
-    def arm_joint_limits(self) -> list[tuple[str, float, float]]: ...
-
-
-class CoordinatorControlSpec(Spec, Protocol):
-    """Arm / dry-run knobs on a ControlCoordinator.
-
-    Matches the same RPCs the command center hits — see
-    ``WebsocketVisModule._create_server`` ``arm`` / ``disarm`` / ``set_dry_run``
-    handlers. Any module exposing these two methods (e.g. ``ControlCoordinator``)
-    is auto-wired and unlocks the HUD's Policy toggles.
-    """
-
-    def set_activated(self, engaged: bool) -> None: ...
-    def set_dry_run(self, enabled: bool) -> None: ...
-
-
-def _compose_scene_mesh_wxyz(
-    *, y_up: bool, rotation_zyx_deg: tuple[float, float, float]
-) -> tuple[float, float, float, float]:
-    matrix = np.eye(3, dtype=np.float64)
-    if y_up:
-        matrix = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)
-
-    rz, ry, rx = (np.deg2rad(angle) for angle in rotation_zyx_deg)
-    cz, sz = np.cos(rz), np.sin(rz)
-    cy, sy = np.cos(ry), np.sin(ry)
-    cx, sx = np.cos(rx), np.sin(rx)
-    rotate_z = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dtype=np.float64)
-    rotate_y = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float64)
-    rotate_x = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], dtype=np.float64)
-    matrix = rotate_z @ rotate_y @ rotate_x @ matrix
-
-    out = np.zeros(4, dtype=np.float64)
-    mujoco.mju_mat2Quat(out, matrix.flatten())
-    return (float(out[0]), float(out[1]), float(out[2]), float(out[3]))
-
-
-def _path_contains(parent: Path, child: Path) -> bool:
-    try:
-        child.resolve().relative_to(parent.resolve())
-    except ValueError:
-        return False
-    return True
-
-
-def _media_type(path: Path) -> str | None:
-    match path.suffix.lower():
-        case ".glb":
-            return "model/gltf-binary"
-        case ".gltf":
-            return "model/gltf+json"
-        case _:
-            return mimetypes.guess_type(path.name)[0]
 
 
 class BabylonSceneViewerModule(Module):
@@ -238,24 +124,19 @@ class BabylonSceneViewerModule(Module):
         self._latest_pointcloud_payload: dict[str, Any] | None = None
         self._last_pointcloud_sent = 0.0
 
-        self._x = cfg.init_x
-        self._y = cfg.init_y
-        self._z = cfg.init_z + cfg.vehicle_height
-        self._yaw = cfg.init_yaw
-        self._fwd_speed = 0.0
-        self._left_speed = 0.0
-        self._yaw_rate = 0.0
-        self._cmd_lock = threading.Lock()
+        self._kinematic = KinematicBaseSim(
+            init_x=cfg.init_x,
+            init_y=cfg.init_y,
+            init_z=cfg.init_z,
+            init_yaw=cfg.init_yaw,
+            vehicle_height=cfg.vehicle_height,
+            sim_rate=cfg.sim_rate,
+            lock_z=cfg.lock_z,
+        )
         self._sim_thread: threading.Thread | None = None
 
         if cfg.enable_sim:
-            self._latest_base_pos = np.array(
-                [cfg.init_x, cfg.init_y, cfg.init_z + cfg.vehicle_height], dtype=np.float64
-            )
-            self._latest_base_wxyz = np.array(
-                [math.cos(cfg.init_yaw / 2.0), 0.0, 0.0, math.sin(cfg.init_yaw / 2.0)],
-                dtype=np.float64,
-            )
+            self._latest_base_pos, self._latest_base_wxyz = self._kinematic.snapshot().base_arrays()
 
         # _turbo_jpeg is lazy-initialised so the viewer still imports cleanly
         # on machines without PyTurboJPEG (it's an optional dep).
@@ -264,6 +145,7 @@ class BabylonSceneViewerModule(Module):
         self._turbo_jpeg: Any = None
 
         self._robot: RobotMeshes | None = None
+        self._raycast_scene: RaycastScene | None = None
         self._uvicorn_server: uvicorn.Server | None = None
         self._server_thread: threading.Thread | None = None
         self._broadcast_thread: threading.Thread | None = None
@@ -273,15 +155,22 @@ class BabylonSceneViewerModule(Module):
 
         self._lidar_min_dt = 1.0 / cfg.lidar_hz if cfg.lidar_hz > 0 else float("inf")
         self._last_lidar_sent = 0.0
-        self._lidar_dirs: np.ndarray | None = None
-        self._lidar_geomid_buf: np.ndarray | None = None
-        self._lidar_self_body_ids: np.ndarray | None = None
+        self._lidar = SyntheticLidar(
+            SyntheticLidarConfig(
+                n_azimuth=cfg.lidar_n_azimuth,
+                n_elevation=cfg.lidar_n_elevation,
+                elevation_min_deg=cfg.lidar_elevation_min_deg,
+                elevation_max_deg=cfg.lidar_elevation_max_deg,
+                max_range=cfg.lidar_max_range,
+            )
+        )
 
     @rpc
     def start(self) -> None:
         super().start()
 
         self._robot = load_robot_meshes(self._mjcf_path, assets=self._assets)
+        self._raycast_scene = MujocoRaycastScene(self._robot)
         app = self._create_app()
         config = uvicorn.Config(app, host="0.0.0.0", port=self.config.port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)
@@ -374,7 +263,7 @@ class BabylonSceneViewerModule(Module):
         return JSONResponse({"joints": joints})
 
     async def _index(self, request: Request) -> HTMLResponse:
-        return HTMLResponse(_HTML)
+        return HTMLResponse(HTML)
 
     async def _config(self, request: Request) -> JSONResponse:
         scene = self.config.scene
@@ -382,13 +271,13 @@ class BabylonSceneViewerModule(Module):
         scene_bytes = 0
         scale = 1.0
         translation: tuple[float, float, float] = (0.0, 0.0, 0.0)
-        wxyz = _compose_scene_mesh_wxyz(y_up=True, rotation_zyx_deg=(0.0, 0.0, 0.0))
+        wxyz = compose_scene_mesh_wxyz(y_up=True, rotation_zyx_deg=(0.0, 0.0, 0.0))
         if scene is not None and self._scene_path is not None and self._scene_path.exists():
             scene_file = f"scene{self._scene_path.suffix.lower()}"
             scene_bytes = self._scene_path.stat().st_size
             scale = scene.scale
             translation = scene.translation
-            wxyz = _compose_scene_mesh_wxyz(
+            wxyz = compose_scene_mesh_wxyz(
                 y_up=scene.y_up,
                 rotation_zyx_deg=scene.rotation_zyx_deg,
             )
@@ -429,12 +318,12 @@ class BabylonSceneViewerModule(Module):
         asset_name = request.path_params["asset_name"]
         scene_asset_name = f"scene{self._scene_path.suffix.lower()}"
         if asset_name == scene_asset_name:
-            return FileResponse(self._scene_path, media_type=_media_type(self._scene_path))
+            return FileResponse(self._scene_path, media_type=media_type(self._scene_path))
 
         if self._scene_path.suffix.lower() == ".gltf":
             candidate = self._scene_path.parent / asset_name
-            if _path_contains(self._scene_path.parent, candidate) and candidate.exists():
-                return FileResponse(candidate, media_type=_media_type(candidate))
+            if path_contains(self._scene_path.parent, candidate) and candidate.exists():
+                return FileResponse(candidate, media_type=media_type(candidate))
 
         return Response("asset not found", status_code=404)
 
@@ -607,7 +496,7 @@ class BabylonSceneViewerModule(Module):
             base_wxyz = None if self._latest_base_wxyz is None else self._latest_base_wxyz.copy()
             path_points = [point[:] for point in self._latest_path]
 
-        self._apply_robot_state(robot, base_pos, base_wxyz, joints)
+        apply_robot_state(robot, base_pos, base_wxyz, joints)
 
         bodies = []
         for body_id, body_name in enumerate(robot.body_names):
@@ -619,19 +508,7 @@ class BabylonSceneViewerModule(Module):
                 }
             )
 
-        # Normalise joint names to the short form the slider HUD uses:
-        #   * strip a leading "<hwid>/" prefix (e.g. "g1/left_shoulder_pitch"
-        #     → "left_shoulder_pitch") for coordinator-style names.
-        #   * strip a trailing "_joint" suffix (e.g. "left_shoulder_pitch_joint"
-        #     → "left_shoulder_pitch") for URDF-style names.
-        def _canon(k: str) -> str:
-            if "/" in k:
-                k = k.split("/", 1)[1]
-            if k.endswith("_joint"):
-                k = k[: -len("_joint")]
-            return k
-
-        joint_positions = {_canon(k): float(v) for k, v in joints.items()}
+        joint_positions = {canonical_joint_name(k): float(v) for k, v in joints.items()}
         return {
             "type": "state",
             "time": time.time(),
@@ -640,33 +517,10 @@ class BabylonSceneViewerModule(Module):
             "joints": joint_positions,
         }
 
-    @staticmethod
-    def _apply_robot_state(
-        robot: RobotMeshes,
-        base_pos: np.ndarray | None,
-        base_wxyz: np.ndarray | None,
-        joint_positions: dict[str, float],
-    ) -> None:
-        """Splice base + joint values into qpos and run FK in-place.
-
-        After this returns, ``robot.data.xpos`` / ``robot.data.xquat`` hold
-        each body's world pose. Cheap (~50 us for G1).
-        """
-        if base_pos is not None:
-            robot.data.qpos[0:3] = base_pos
-        if base_wxyz is not None:
-            robot.data.qpos[3:7] = base_wxyz
-        if joint_positions:
-            for name, q in joint_positions.items():
-                adr = robot.qpos_addr_by_mjcf_name.get(name)
-                if adr is not None:
-                    robot.data.qpos[adr] = q
-        mujoco.mj_kinematics(robot.model, robot.data)
-
     def _on_joint_state(self, msg: JointState) -> None:
         with self._state_lock:
             self._latest_joints = {
-                _dimos_joint_to_mjcf(name): float(position)
+                dimos_joint_to_mjcf(name): float(position)
                 for name, position in zip(msg.name, msg.position, strict=False)
             }
 
@@ -686,65 +540,22 @@ class BabylonSceneViewerModule(Module):
             )
 
     def _on_cmd_vel(self, twist: Twist) -> None:
-        with self._cmd_lock:
-            self._fwd_speed = float(twist.linear.x)
-            self._left_speed = float(twist.linear.y)
-            self._yaw_rate = float(twist.angular.z)
+        self._kinematic.set_command(twist)
 
     def _reset_kinematic_state(self) -> None:
-        with self._cmd_lock:
-            self._fwd_speed = 0.0
-            self._left_speed = 0.0
-            self._yaw_rate = 0.0
+        snapshot = self._kinematic.reset()
+        base_pos, base_wxyz = snapshot.base_arrays()
         with self._state_lock:
-            self._x = self.config.init_x
-            self._y = self.config.init_y
-            self._z = self.config.init_z + self.config.vehicle_height
-            self._yaw = self.config.init_yaw
+            self._latest_base_pos = base_pos
+            self._latest_base_wxyz = base_wxyz
 
     def _sim_step(self, dt: float) -> None:
-        with self._cmd_lock:
-            fwd, left, yaw_rate = self._fwd_speed, self._left_speed, self._yaw_rate
-
+        snapshot = self._kinematic.step(dt)
+        self.odometry.publish(snapshot.to_odometry())
+        base_pos, base_wxyz = snapshot.base_arrays()
         with self._state_lock:
-            prev_z = self._z
-            self._yaw += dt * yaw_rate
-            if self._yaw > math.pi:
-                self._yaw -= 2 * math.pi
-            elif self._yaw < -math.pi:
-                self._yaw += 2 * math.pi
-            cos_yaw, sin_yaw = math.cos(self._yaw), math.sin(self._yaw)
-            self._x += dt * (cos_yaw * fwd - sin_yaw * left)
-            self._y += dt * (sin_yaw * fwd + cos_yaw * left)
-            if not self.config.lock_z:
-                self._z = self.config.init_z + self.config.vehicle_height
-            x, y, z, yaw = self._x, self._y, self._z, self._yaw
-
-        now = time.time()
-        quaternion = Quaternion.from_euler(Vector3(0.0, 0.0, yaw))
-
-        self.odometry.publish(
-            Odometry(
-                ts=now,
-                frame_id="map",
-                child_frame_id="sensor",
-                pose=Pose(
-                    position=[x, y, z],
-                    orientation=[quaternion.x, quaternion.y, quaternion.z, quaternion.w],
-                ),
-                twist=Twist(
-                    linear=[fwd, left, (z - prev_z) * self.config.sim_rate],
-                    angular=[0.0, 0.0, yaw_rate],
-                ),
-            )
-        )
-
-        with self._state_lock:
-            self._latest_base_pos = np.array([x, y, z], dtype=np.float64)
-            self._latest_base_wxyz = np.array(
-                [quaternion.w, quaternion.x, quaternion.y, quaternion.z],
-                dtype=np.float64,
-            )
+            self._latest_base_pos = base_pos
+            self._latest_base_wxyz = base_wxyz
 
     def _sim_loop(self) -> None:
         dt = self._sim_dt
@@ -761,71 +572,23 @@ class BabylonSceneViewerModule(Module):
             if sleep_for > 0:
                 time.sleep(sleep_for)
 
-    def _ensure_lidar_buffers(self) -> bool:
-        """Lazy-build ray directions + a 'skip my own body' geom filter."""
-        if self._robot is None:
-            return False
-        if self._lidar_dirs is not None:
-            return True
-        cfg = self.config
-        azimuths = np.linspace(0.0, 2.0 * math.pi, cfg.lidar_n_azimuth, endpoint=False)
-        elevations = np.linspace(
-            math.radians(cfg.lidar_elevation_min_deg),
-            math.radians(cfg.lidar_elevation_max_deg),
-            cfg.lidar_n_elevation,
-        )
-        az, el = np.meshgrid(azimuths, elevations, indexing="xy")
-        cos_el = np.cos(el)
-        dirs = np.stack([cos_el * np.cos(az), cos_el * np.sin(az), np.sin(el)], axis=-1).reshape(
-            -1, 3
-        )
-        self._lidar_dirs = np.ascontiguousarray(dirs, dtype=np.float64)
-        self._lidar_geomid_buf = np.zeros(1, dtype=np.int32)
-        return True
-
     def _publish_lidar_scan(self) -> None:
-        if not self._ensure_lidar_buffers():
+        scene = self._raycast_scene
+        if scene is None:
             return
-        robot = self._robot
-        assert robot is not None and self._lidar_dirs is not None
-        assert self._lidar_geomid_buf is not None
 
-        with self._state_lock:
-            x, y, z = self._x, self._y, self._z
-            yaw = self._yaw
+        snapshot = self._kinematic.snapshot()
         origin = np.array(
-            [x, y, z - self.config.vehicle_height + self.config.lidar_z_offset],
+            [
+                snapshot.x,
+                snapshot.y,
+                snapshot.z - self._kinematic.vehicle_height + self.config.lidar_z_offset,
+            ],
             dtype=np.float64,
         )
-
-        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
-        rotation = np.array(
-            [[cos_yaw, -sin_yaw, 0.0], [sin_yaw, cos_yaw, 0.0], [0.0, 0.0, 1.0]],
-            dtype=np.float64,
-        )
-        world_dirs = self._lidar_dirs @ rotation.T
-
-        max_range = self.config.lidar_max_range
-        hits: list[tuple[float, float, float]] = []
-        for direction in world_dirs:
-            dist = mujoco.mj_ray(
-                robot.model,
-                robot.data,
-                origin,
-                direction,
-                None,  # geomgroup mask — None = all
-                1,  # static-geom inclusion: 1=include
-                -1,  # body to exclude: -1=none
-                self._lidar_geomid_buf,
-            )
-            if dist < 0 or dist > max_range:
-                continue
-            hit = origin + direction * dist
-            hits.append((float(hit[0]), float(hit[1]), float(hit[2])))
-
-        if not hits:
+        points = self._lidar.scan(scene, origin, snapshot.yaw)
+        if points is None:
             return
-        points = np.array(hits, dtype=np.float32)
         self.registered_scan.publish(
             PointCloud2.from_numpy(points, frame_id="map", timestamp=time.time())
         )
@@ -866,11 +629,11 @@ class BabylonSceneViewerModule(Module):
             return
 
         # Binary frame layout:
-        #   byte 0:      _WS_MSG_CAMERA (0x01)
+        #   byte 0:      WS_MSG_CAMERA (0x01)
         #   bytes 1-2:   name length (big-endian uint16)
         #   bytes 3..:   utf-8 camera name, then JPEG payload
         name = self.config.camera_name.encode("utf-8")[:65535]
-        header = bytes([_WS_MSG_CAMERA]) + len(name).to_bytes(2, "big") + name
+        header = bytes([WS_MSG_CAMERA]) + len(name).to_bytes(2, "big") + name
         self._broadcast_bytes_from_thread(header + jpeg)
 
     def _encode_jpeg(self, msg: Image) -> bytes | None:
@@ -955,1304 +718,3 @@ class BabylonSceneViewerModule(Module):
             "positions": np.round(points, 3).reshape(-1).tolist(),
             "colors": colors.reshape(-1).tolist(),
         }
-
-
-_HTML = r"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DimOS Scene Viewer</title>
-    <script src="https://cdn.babylonjs.com/babylon.js"></script>
-    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
-    <style>
-      html,
-      body,
-      #renderCanvas {
-        width: 100%;
-        height: 100%;
-        margin: 0;
-        overflow: hidden;
-        background: #101216;
-        color: #e7ebf2;
-        font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-          sans-serif;
-      }
-
-      #hud {
-        position: fixed;
-        left: 16px;
-        top: 16px;
-        display: flex;
-        align-items: stretch;
-        flex-wrap: wrap;
-        gap: 10px;
-        max-width: calc(100vw - 32px);
-        padding: 8px 10px;
-        border: 1px solid rgb(255 255 255 / 10%);
-        border-radius: 10px;
-        background: rgb(17 20 26 / 86%);
-        backdrop-filter: blur(14px);
-        box-shadow: 0 6px 24px rgb(0 0 0 / 32%);
-      }
-
-      .hud-group {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding-right: 12px;
-        border-right: 1px solid rgb(255 255 255 / 8%);
-      }
-
-      .hud-group:has(+ #status),
-      .hud-group:last-of-type {
-        border-right: none;
-        padding-right: 0;
-      }
-
-      .hud-label {
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: rgb(255 255 255 / 38%);
-        margin-right: 2px;
-        font-weight: 600;
-      }
-
-      button,
-      #status {
-        height: 28px;
-        border: 1px solid rgb(255 255 255 / 14%);
-        border-radius: 6px;
-        background: rgb(255 255 255 / 6%);
-        color: inherit;
-        font: inherit;
-        font-size: 12px;
-        white-space: nowrap;
-      }
-
-      button {
-        padding: 0 10px;
-        cursor: pointer;
-        transition: background 0.12s, border-color 0.12s, opacity 0.12s;
-      }
-
-      button:hover {
-        background: rgb(255 255 255 / 12%);
-        border-color: rgb(255 255 255 / 22%);
-      }
-
-      button:active {
-        transform: translateY(1px);
-      }
-
-      button[data-active="true"] {
-        background: rgb(96 165 250 / 18%);
-        border-color: rgb(96 165 250 / 42%);
-        color: rgb(180 210 255);
-      }
-
-      button[data-active="false"] {
-        opacity: 0.6;
-      }
-
-      .hud-segmented {
-        display: flex;
-        border: 1px solid rgb(255 255 255 / 14%);
-        border-radius: 6px;
-        overflow: hidden;
-      }
-
-      .hud-segmented button {
-        height: 28px;
-        border: none;
-        border-radius: 0;
-        border-right: 1px solid rgb(255 255 255 / 8%);
-        background: transparent;
-      }
-
-      .hud-segmented button:last-child {
-        border-right: none;
-      }
-
-      .hud-segmented button:hover {
-        background: rgb(255 255 255 / 8%);
-      }
-
-      .hud-segmented button[data-active="true"] {
-        background: rgb(96 165 250 / 22%);
-        color: rgb(200 220 255);
-      }
-
-      .hud-segmented button[data-active="false"] {
-        opacity: 1;       /* segmented controls show all 3, just highlight active */
-        color: rgb(255 255 255 / 72%);
-      }
-
-      .hud-hidden-by-default {
-        display: none;
-      }
-
-      #status {
-        display: flex;
-        align-items: center;
-        min-width: 140px;
-        padding: 0 12px;
-        margin-left: 4px;
-        color: rgb(255 255 255 / 75%);
-        background: rgb(255 255 255 / 3%);
-        border-color: rgb(255 255 255 / 8%);
-      }
-
-      #cameraPanel {
-        position: fixed;
-        right: 16px;
-        bottom: 16px;
-        width: 360px;
-        max-width: calc(100vw - 32px);
-        border: 1px solid rgb(255 255 255 / 12%);
-        border-radius: 8px;
-        background: rgb(17 20 26 / 82%);
-        backdrop-filter: blur(10px);
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-      }
-
-      #cameraPanel[data-active="false"] {
-        display: none;
-      }
-
-      #cameraHeader {
-        padding: 6px 10px;
-        font-size: 12px;
-        color: rgb(255 255 255 / 70%);
-        border-bottom: 1px solid rgb(255 255 255 / 8%);
-      }
-
-      #cameraImg {
-        width: 100%;
-        display: block;
-        aspect-ratio: 16 / 9;
-        object-fit: cover;
-        background: #000;
-      }
-
-      #cameraPanel[data-has-frame="false"] #cameraImg {
-        display: none;
-      }
-
-      #cameraEmpty {
-        padding: 30px;
-        text-align: center;
-        color: rgb(255 255 255 / 50%);
-        font-size: 12px;
-        aspect-ratio: 16 / 9;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-
-      #cameraPanel[data-has-frame="true"] #cameraEmpty {
-        display: none;
-      }
-
-      #armsPanel {
-        position: fixed;
-        right: 16px;
-        top: 16px;
-        width: 420px;
-        max-width: calc(100vw - 32px);
-        max-height: calc(100vh - 320px);
-        overflow-y: auto;
-        padding: 14px 16px 16px 16px;
-        border: 1px solid rgb(255 255 255 / 10%);
-        border-radius: 10px;
-        background: rgb(17 20 26 / 90%);
-        backdrop-filter: blur(14px);
-        box-shadow: 0 8px 28px rgb(0 0 0 / 40%);
-        z-index: 5;
-      }
-
-      #armsPanel[data-active="false"] {
-        display: none;
-      }
-
-      #armsHeader {
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        color: rgb(255 255 255 / 50%);
-        margin-bottom: 12px;
-        font-weight: 600;
-      }
-
-      #armsColumns {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 14px;
-      }
-
-      .arm-col-title {
-        font-size: 12px;
-        color: rgb(255 255 255 / 80%);
-        margin-bottom: 6px;
-        font-weight: 600;
-        text-align: center;
-        padding: 4px 0;
-        background: rgb(255 255 255 / 4%);
-        border-radius: 4px;
-      }
-
-      .arm-sliders {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-
-      .arm-slider-row {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 2px 6px;
-        align-items: center;
-      }
-
-      .arm-slider-row .joint-name {
-        font-size: 11px;
-        color: rgb(255 255 255 / 75%);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .arm-slider-row .joint-val {
-        font-size: 10px;
-        color: rgb(96 165 250 / 90%);
-        font-variant-numeric: tabular-nums;
-        min-width: 48px;
-        text-align: right;
-        font-family: ui-monospace, "SF Mono", Menlo, monospace;
-      }
-
-      .arm-slider-row input[type="range"] {
-        grid-column: 1 / span 2;
-        appearance: none;
-        -webkit-appearance: none;
-        width: 100%;
-        height: 4px;
-        background: rgb(255 255 255 / 8%);
-        border-radius: 2px;
-        outline: none;
-      }
-
-      .arm-slider-row input[type="range"]::-webkit-slider-thumb {
-        appearance: none;
-        -webkit-appearance: none;
-        width: 12px;
-        height: 12px;
-        background: rgb(96 165 250);
-        border-radius: 50%;
-        cursor: pointer;
-        border: none;
-      }
-
-      .arm-slider-row input[type="range"]::-moz-range-thumb {
-        width: 12px;
-        height: 12px;
-        background: rgb(96 165 250);
-        border-radius: 50%;
-        cursor: pointer;
-        border: none;
-      }
-
-      .arm-slider-row .joint-range {
-        grid-column: 1 / span 2;
-        display: flex;
-        justify-content: space-between;
-        font-size: 9px;
-        color: rgb(255 255 255 / 35%);
-        font-variant-numeric: tabular-nums;
-      }
-    </style>
-  </head>
-  <body>
-    <canvas id="renderCanvas"></canvas>
-    <div id="cameraPanel" data-active="false" data-has-frame="false">
-      <div id="cameraHeader">
-        <span id="cameraLabel">camera</span>
-      </div>
-      <img id="cameraImg" alt="" />
-      <div id="cameraEmpty">waiting for frames…</div>
-    </div>
-    <div id="armsPanel" data-active="false">
-      <div id="armsHeader">Arm joints</div>
-      <div id="armsColumns">
-        <div class="arm-col">
-          <div class="arm-col-title">Left</div>
-          <div id="leftArmSliders" class="arm-sliders"></div>
-        </div>
-        <div class="arm-col">
-          <div class="arm-col-title">Right</div>
-          <div id="rightArmSliders" class="arm-sliders"></div>
-        </div>
-      </div>
-    </div>
-    <div id="hud">
-      <div class="hud-group">
-        <span class="hud-label">View</span>
-        <button id="toggleScene" data-active="true">Scene</button>
-        <button id="toggleRobot" data-active="true">Robot</button>
-        <button id="toggleCamera" data-active="false">Camera</button>
-        <button id="toggleLidar" data-active="true">Lidar</button>
-        <button id="toggleDepth" data-active="true">Depth</button>
-        <button id="toggleWire" data-active="false">Wire</button>
-        <button id="forceVisible" data-active="false">Force</button>
-      </div>
-      <div class="hud-group">
-        <span class="hud-label">Policy</span>
-        <button id="policyArm" data-active="false" title="Arm/disarm the coordinator's control tasks">Arm</button>
-        <button id="policyDryRun" data-active="true" title="Dry-run: task computes but coordinator does not write to hardware">Dry-run</button>
-      </div>
-      <div class="hud-group">
-        <span class="hud-label">Arms</span>
-        <button id="armsToggle" data-active="false">Sliders</button>
-        <button id="armsRelease">Release</button>
-      </div>
-      <div class="hud-group">
-        <span class="hud-label">Interact</span>
-        <button id="toggleDrive" data-active="false">Drive</button>
-        <button id="navClick" data-active="false">Nav</button>
-        <button id="pointClick" data-active="false">Point</button>
-        <button id="focusRobot">Focus</button>
-        <button id="loadScene">Load Scene</button>
-        <button id="respawnRobot" class="hud-hidden-by-default">Respawn</button>
-      </div>
-      <span id="status">starting</span>
-    </div>
-    <script>
-      const canvas = document.getElementById("renderCanvas");
-      const statusEl = document.getElementById("status");
-      const engine = new BABYLON.Engine(canvas, true, {
-        preserveDrawingBuffer: true,
-        stencil: true,
-        antialias: true,
-      });
-      const scene = new BABYLON.Scene(engine);
-      scene.useRightHandedSystem = true;
-      scene.clearColor = new BABYLON.Color4(0.055, 0.063, 0.078, 1);
-
-      const camera = new BABYLON.ArcRotateCamera(
-        "camera",
-        -Math.PI / 2,
-        Math.PI / 3,
-        8,
-        new BABYLON.Vector3(0, 0, 1),
-        scene,
-      );
-      camera.upVector = new BABYLON.Vector3(0, 0, 1);
-      // Tight near/far range for usable depth precision on office-scale
-      // scenes — the original 0.01/100000 ratio (~1e7) caused heavy z-fighting
-      // on coplanar GLB walls/floors. 0.05/500 gives ~3 cm precision at 500 m.
-      camera.minZ = 0.05;
-      camera.maxZ = 500;
-      camera.wheelPrecision = 40;
-      camera.attachControl(canvas, true);
-
-      new BABYLON.HemisphericLight("skyLight", new BABYLON.Vector3(0.2, 0.4, 1), scene);
-      const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.4, -0.6, -1), scene);
-      sun.position = new BABYLON.Vector3(20, 30, 40);
-      scene.environmentIntensity = 0.85;
-      try {
-        scene.environmentTexture = BABYLON.CubeTexture.CreateFromPrefilteredData(
-          "https://assets.babylonjs.com/environments/environmentSpecular.env",
-          scene,
-        );
-      } catch (error) {
-        console.warn("environment map unavailable", error);
-      }
-
-      const bodyNodes = new Map();
-      const sceneMeshes = [];
-      const robotMeshes = [];
-      const maxAutoSceneBytes = 2 * 1024 * 1024 * 1024;
-      const params = new URLSearchParams(window.location.search);
-      const useRobotMesh = params.get("robot") !== "proxy";
-      const sceneMode = params.get("scene") || "auto";
-      let sceneConfig = null;
-      let sceneLoadStarted = false;
-      let pathMesh = null;
-      let lidarMesh = null;
-      let lidarMaterial = null;
-      let lidarVisible = true;
-      let clickMode = null;
-      let navGoalMarker = null;
-      let pointGoalMarker = null;
-      let latestRootPosition = null;
-      let sceneDepthEnabled = true;
-      let sceneWireEnabled = false;
-      let forceVisibleEnabled = false;
-      let driveEnabled = false;
-      let lastDriveSendTime = 0;
-      let lastDriveSignature = "";
-      let proxyMaterial = null;
-      const pressedKeys = new Set();
-      const driveSendPeriod = 0.08;
-      const driveLinearSpeed = 0.35;
-      const driveStrafeSpeed = 0.25;
-      const driveAngularSpeed = 0.8;
-
-      const vec3 = (values) => new BABYLON.Vector3(values[0], values[1], values[2]);
-      const quatWxyz = (values) =>
-        new BABYLON.Quaternion(values[1], values[2], values[3], values[0]);
-
-      function setStatus(message) {
-        statusEl.textContent = message;
-      }
-
-      function setButtonActive(id, active) {
-        document.getElementById(id).dataset.active = String(active);
-      }
-
-      function setSceneVisibility(visible) {
-        for (const mesh of sceneMeshes) mesh.setEnabled(visible);
-        setButtonActive("toggleScene", visible);
-      }
-
-      function setRobotVisibility(visible) {
-        for (const mesh of robotMeshes) mesh.setEnabled(visible);
-        setButtonActive("toggleRobot", visible);
-      }
-
-      function setLidarVisibility(visible) {
-        lidarVisible = visible;
-        if (lidarMesh) lidarMesh.setEnabled(visible);
-        setButtonActive("toggleLidar", visible);
-      }
-
-      function setClickMode(mode) {
-        clickMode = clickMode === mode ? null : mode;
-        setButtonActive("navClick", clickMode === "nav");
-        setButtonActive("pointClick", clickMode === "point");
-        if (clickMode === "nav") setStatus("click nav target");
-        if (clickMode === "point") setStatus("click point target");
-        if (clickMode === null) setStatus("live");
-      }
-
-      function markerMaterial(name, color) {
-        const material = new BABYLON.StandardMaterial(name, scene);
-        material.diffuseColor = color;
-        material.emissiveColor = color.scale(0.75);
-        material.specularColor = BABYLON.Color3.Black();
-        material.disableLighting = true;
-        return material;
-      }
-
-      const navMarkerMaterial = markerMaterial(
-        "navGoalMaterial",
-        new BABYLON.Color3(0.06, 0.82, 1.0),
-      );
-      const pointMarkerMaterial = markerMaterial(
-        "pointGoalMaterial",
-        new BABYLON.Color3(1.0, 0.18, 0.78),
-      );
-
-      function placeMarker(existingMarker, name, position, material, diameter) {
-        if (existingMarker) existingMarker.dispose();
-        const marker = BABYLON.MeshBuilder.CreateSphere(
-          name,
-          { diameter, segments: 16 },
-          scene,
-        );
-        marker.position = position;
-        marker.material = material;
-        marker.isPickable = false;
-        return marker;
-      }
-
-      function updateKeyboardCamera() {
-        if (driveEnabled) return;
-        const deltaSeconds = Math.min(engine.getDeltaTime() / 1000, 0.05);
-        const speed = (pressedKeys.has("shift") ? 8.0 : 2.7) * deltaSeconds;
-        const up = new BABYLON.Vector3(0, 0, 1);
-        const forward = camera.getForwardRay().direction;
-        forward.z = 0;
-        if (forward.lengthSquared() < 1e-8) return;
-        forward.normalize();
-        const right = BABYLON.Vector3.Cross(forward, up).normalize();
-        const move = BABYLON.Vector3.Zero();
-
-        if (pressedKeys.has("w")) move.addInPlace(forward);
-        if (pressedKeys.has("s")) move.subtractInPlace(forward);
-        if (pressedKeys.has("d")) move.addInPlace(right);
-        if (pressedKeys.has("a")) move.subtractInPlace(right);
-        if (pressedKeys.has("e")) move.addInPlace(up);
-        if (pressedKeys.has("q")) move.subtractInPlace(up);
-
-        if (move.lengthSquared() === 0) return;
-        move.normalize().scaleInPlace(speed);
-        camera.target.addInPlace(move);
-      }
-
-      function sendSocketPayload(payload) {
-        const socket = socketRef.current;
-        if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-        socket.send(JSON.stringify(payload));
-        return true;
-      }
-
-      function currentDriveTwist() {
-        const speedScale = pressedKeys.has("shift") ? 1.8 : 1.0;
-        let linearX = 0.0;
-        let linearY = 0.0;
-        let angularZ = 0.0;
-
-        if (pressedKeys.has("w")) linearX += driveLinearSpeed * speedScale;
-        if (pressedKeys.has("s")) linearX -= driveLinearSpeed * speedScale;
-        if (pressedKeys.has("q")) linearY += driveStrafeSpeed * speedScale;
-        if (pressedKeys.has("e")) linearY -= driveStrafeSpeed * speedScale;
-        if (pressedKeys.has("a")) angularZ += driveAngularSpeed * speedScale;
-        if (pressedKeys.has("d")) angularZ -= driveAngularSpeed * speedScale;
-
-        return {
-          linear: [linearX, linearY, 0.0],
-          angular: [0.0, 0.0, angularZ],
-        };
-      }
-
-      function sendDriveCommand(force = false) {
-        if (!driveEnabled && !force) return;
-        const now = performance.now() / 1000;
-        if (!force && now - lastDriveSendTime < driveSendPeriod) return;
-
-        const twist = force
-          ? { linear: [0.0, 0.0, 0.0], angular: [0.0, 0.0, 0.0] }
-          : currentDriveTwist();
-        const signature = JSON.stringify(twist);
-        const isZero =
-          twist.linear.every((value) => Math.abs(value) < 1e-6) &&
-          twist.angular.every((value) => Math.abs(value) < 1e-6);
-        if (!force && isZero && signature === lastDriveSignature) return;
-
-        if (sendSocketPayload({ type: "cmd_vel", ...twist })) {
-          lastDriveSendTime = now;
-          lastDriveSignature = signature;
-        }
-      }
-
-      function setDriveEnabled(enabled) {
-        driveEnabled = enabled;
-        setButtonActive("toggleDrive", enabled);
-        setStatus(enabled ? "drive: WASD turn/move, QE strafe" : "live");
-        if (!enabled) sendDriveCommand(true);
-      }
-
-      function setSceneDepthWrite(enabled) {
-        sceneDepthEnabled = enabled;
-        const visited = new Set();
-        for (const mesh of sceneMeshes) {
-          const material = mesh.material;
-          if (!material || visited.has(material.uniqueId)) continue;
-          visited.add(material.uniqueId);
-          material.disableDepthWrite = !enabled;
-          // Don't enable needDepthPrePass — combined with depth-write in the
-          // main pass it writes depth twice per frame, and float-epsilon
-          // disagreement between the two passes causes z-fighting on any
-          // coplanar/near-coplanar GLB surfaces.
-          material.needDepthPrePass = false;
-        }
-        setButtonActive("toggleDepth", enabled);
-      }
-
-      function setSceneWireframe(enabled) {
-        sceneWireEnabled = enabled;
-        const visited = new Set();
-        for (const mesh of sceneMeshes) {
-          const material = mesh.material;
-          if (!material || visited.has(material.uniqueId)) continue;
-          visited.add(material.uniqueId);
-          material.wireframe = enabled;
-        }
-        setButtonActive("toggleWire", enabled);
-      }
-
-      function setForceVisible(enabled) {
-        forceVisibleEnabled = enabled;
-        const visited = new Set();
-        for (const mesh of sceneMeshes) {
-          const material = mesh.material;
-          if (!material || visited.has(material.uniqueId)) continue;
-          visited.add(material.uniqueId);
-          material.backFaceCulling = false;
-          material.alpha = 1;
-          material.disableDepthWrite = false;
-          material.forceDepthWrite = true;
-          material.transparencyMode = enabled
-            ? BABYLON.Material.MATERIAL_OPAQUE
-            : material.transparencyMode;
-          if (enabled && material.albedoColor) {
-            material.metallic = 0;
-            material.roughness = 0.9;
-            material.environmentIntensity = 1;
-          }
-          if (enabled && material.diffuseColor) {
-            material.diffuseColor = material.diffuseColor || new BABYLON.Color3(0.8, 0.8, 0.8);
-          }
-        }
-        setButtonActive("forceVisible", enabled);
-      }
-
-      function fitCameraToMeshes(meshes) {
-        const min = new BABYLON.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
-        const max = new BABYLON.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
-        let count = 0;
-        for (const mesh of meshes) {
-          if (!mesh.getTotalVertices || mesh.getTotalVertices() === 0) continue;
-          mesh.computeWorldMatrix(true);
-          mesh.refreshBoundingInfo(true);
-          const box = mesh.getBoundingInfo().boundingBox;
-          BABYLON.Vector3.MinimizeToRef(min, box.minimumWorld, min);
-          BABYLON.Vector3.MaximizeToRef(max, box.maximumWorld, max);
-          count += 1;
-        }
-        if (count === 0) return;
-        const center = min.add(max).scale(0.5);
-        const extent = max.subtract(min);
-        camera.setTarget(center);
-        camera.radius = Math.max(2, extent.length() * 0.55);
-        setStatus(`scene ${count} meshes`);
-      }
-
-      function focusRobot() {
-        if (!latestRootPosition) return;
-        camera.setTarget(latestRootPosition);
-        camera.radius = Math.max(4, camera.radius);
-      }
-
-      async function loadConfig() {
-        const response = await fetch("/config.json", { cache: "no-store" });
-        return await response.json();
-      }
-
-      async function loadSceneAsset(config) {
-        if (sceneLoadStarted) return;
-        sceneLoadStarted = true;
-        if (!config.sceneFile) return;
-        if (config.sceneBytes > maxAutoSceneBytes) {
-          setStatus("scene exceeds browser load guard");
-          return;
-        }
-        setStatus("loading scene");
-        const root = new BABYLON.TransformNode("sceneRoot", scene);
-        root.position = vec3(config.scenePosition);
-        root.scaling = new BABYLON.Vector3(config.sceneScale, config.sceneScale, config.sceneScale);
-        root.rotationQuaternion = quatWxyz(config.sceneWxyz);
-
-        engine.stopRenderLoop(renderFrame);
-        let result = null;
-        try {
-          result = await BABYLON.SceneLoader.ImportMeshAsync(null, "/assets/", config.sceneFile, scene);
-        } finally {
-          engine.runRenderLoop(renderFrame);
-        }
-
-        for (const light of result.lights || []) {
-          light.dispose();
-        }
-        for (const camera of result.cameras || []) {
-          camera.dispose();
-        }
-        for (const mesh of result.meshes) {
-          if (mesh.parent === null) mesh.parent = root;
-          mesh.isPickable = true;
-          mesh.metadata = { dimosSceneMesh: true };
-          if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) sceneMeshes.push(mesh);
-          // Keep the GLB's authored face culling — overriding to back=off makes
-          // double-sided GLB walls z-fight against their own back faces.
-        }
-        setSceneDepthWrite(sceneDepthEnabled);
-        setSceneWireframe(sceneWireEnabled);
-        setForceVisible(forceVisibleEnabled);
-        fitCameraToMeshes(sceneMeshes);
-      }
-
-      async function loadRobot() {
-        setStatus("loading robot");
-        const response = await fetch("/robot.json", { cache: "no-store" });
-        const payload = await response.json();
-        for (const bodyName of payload.bodyNames) {
-          const node = new BABYLON.TransformNode(`body:${bodyName}`, scene);
-          node.rotationQuaternion = BABYLON.Quaternion.Identity();
-          bodyNodes.set(bodyName, node);
-        }
-        for (const geom of payload.geoms) {
-          const mesh = new BABYLON.Mesh(`robot:${geom.id}`, scene);
-          const normals = [];
-          BABYLON.VertexData.ComputeNormals(geom.vertices, geom.indices, normals);
-          const vertexData = new BABYLON.VertexData();
-          vertexData.positions = geom.vertices;
-          vertexData.indices = geom.indices;
-          vertexData.normals = normals;
-          vertexData.applyToMesh(mesh);
-
-          const material = new BABYLON.StandardMaterial(`robotMat:${geom.id}`, scene);
-          material.diffuseColor = new BABYLON.Color3(geom.rgba[0], geom.rgba[1], geom.rgba[2]);
-          material.specularColor = new BABYLON.Color3(0.18, 0.18, 0.18);
-          material.alpha = geom.rgba[3] > 0 ? geom.rgba[3] : 1;
-          material.backFaceCulling = false;
-          mesh.material = material;
-
-          mesh.parent = bodyNodes.get(geom.body);
-          mesh.position = vec3(geom.position);
-          mesh.rotationQuaternion = quatWxyz(geom.wxyz);
-          mesh.isPickable = false;
-          robotMeshes.push(mesh);
-        }
-      }
-
-      function proxyDiameter(bodyName) {
-        if (bodyName === "world") return 0;
-        if (bodyName.includes("pelvis") || bodyName.includes("torso")) return 0.22;
-        if (bodyName.includes("hip") || bodyName.includes("shoulder")) return 0.14;
-        if (bodyName.includes("knee") || bodyName.includes("elbow")) return 0.11;
-        if (bodyName.includes("ankle") || bodyName.includes("wrist")) return 0.09;
-        return 0.075;
-      }
-
-      function ensureBodyNode(bodyName) {
-        let node = bodyNodes.get(bodyName);
-        if (node) return node;
-        node = new BABYLON.TransformNode(`body:${bodyName}`, scene);
-        node.rotationQuaternion = BABYLON.Quaternion.Identity();
-        bodyNodes.set(bodyName, node);
-        if (!useRobotMesh) {
-          const diameter = proxyDiameter(bodyName);
-          if (diameter > 0) {
-            if (!proxyMaterial) {
-              proxyMaterial = new BABYLON.StandardMaterial("robotProxyMat", scene);
-              proxyMaterial.diffuseColor = new BABYLON.Color3(0.95, 0.62, 0.24);
-              proxyMaterial.specularColor = new BABYLON.Color3(0.22, 0.22, 0.22);
-            }
-            const marker = BABYLON.MeshBuilder.CreateSphere(
-              `robotProxy:${bodyName}`,
-              { diameter, segments: 8 },
-              scene,
-            );
-            marker.material = proxyMaterial;
-            marker.parent = node;
-            marker.isPickable = false;
-            robotMeshes.push(marker);
-          }
-        }
-        return node;
-      }
-
-      function updateState(payload) {
-        for (const body of payload.bodies) {
-          const node = ensureBodyNode(body.name);
-          node.position = vec3(body.position);
-          node.rotationQuaternion = quatWxyz(body.wxyz);
-          if (body.name === "pelvis" || body.name === "torso_link" || body.name === "body_1") {
-            latestRootPosition = node.position.clone();
-          }
-        }
-
-        if (!latestRootPosition && payload.bodies.length > 1) {
-          latestRootPosition = vec3(payload.bodies[1].position);
-        }
-
-        if (pathMesh) {
-          pathMesh.dispose();
-          pathMesh = null;
-        }
-        if (payload.path && payload.path.length > 1) {
-          pathMesh = BABYLON.MeshBuilder.CreateLines(
-            "navPath",
-            { points: payload.path.map((point) => vec3([point[0], point[1], point[2] + 0.08])) },
-            scene,
-          );
-          pathMesh.color = new BABYLON.Color3(0.15, 0.95, 0.68);
-          pathMesh.isPickable = false;
-        }
-      }
-
-      function updatePointCloud(payload) {
-        const count = payload.count || 0;
-        if (count === 0 || !payload.positions || !payload.colors) return;
-
-        const positions = Float32Array.from(payload.positions);
-        const packedColors = payload.colors;
-        const colors = new Float32Array(count * 4);
-        for (let i = 0; i < count; i += 1) {
-          colors[i * 4 + 0] = packedColors[i * 3 + 0] / 255;
-          colors[i * 4 + 1] = packedColors[i * 3 + 1] / 255;
-          colors[i * 4 + 2] = packedColors[i * 3 + 2] / 255;
-          colors[i * 4 + 3] = 0.86;
-        }
-
-        const nextMesh = new BABYLON.Mesh("lidarCloud", scene);
-        const vertexData = new BABYLON.VertexData();
-        vertexData.positions = positions;
-        vertexData.colors = colors;
-        vertexData.applyToMesh(nextMesh, true);
-        nextMesh.hasVertexAlpha = true;
-        nextMesh.alwaysSelectAsActiveMesh = true;
-        nextMesh.isPickable = false;
-
-        if (!lidarMaterial) {
-          lidarMaterial = new BABYLON.StandardMaterial("lidarMaterial", scene);
-          lidarMaterial.pointsCloud = true;
-          lidarMaterial.pointSize = 2.4;
-          lidarMaterial.disableLighting = true;
-          lidarMaterial.emissiveColor = BABYLON.Color3.White();
-          lidarMaterial.alpha = 0.9;
-        }
-        nextMesh.material = lidarMaterial;
-        nextMesh.setEnabled(lidarVisible);
-
-        if (lidarMesh) lidarMesh.dispose();
-        lidarMesh = nextMesh;
-      }
-
-      function connectWebSocket(socketRef) {
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-        socket.binaryType = "arraybuffer";
-        socketRef.current = socket;
-        socket.onopen = () => setStatus("live");
-        socket.onclose = () => {
-          setStatus("reconnecting");
-          setTimeout(() => connectWebSocket(socketRef), 1000);
-        };
-        socket.onerror = () => setStatus("socket error");
-        socket.onmessage = (event) => {
-          if (typeof event.data === "string") {
-            const payload = JSON.parse(event.data);
-            if (payload.type === "state") {
-              updateState(payload);
-              _updateSlidersFromState(payload.joints);
-            }
-            if (payload.type === "pointcloud") updatePointCloud(payload);
-          } else {
-            handleBinaryMessage(event.data);
-          }
-        };
-        return socket;
-      }
-
-      // Binary websocket frame layout:
-      //   byte 0:      message type (0x01 = camera)
-      //   bytes 1-2:   name length (big-endian uint16)
-      //   bytes 3..n:  utf-8 camera name
-      //   bytes n..:   payload (JPEG bytes for camera)
-      let _lastCameraURL = null;
-      function handleBinaryMessage(buffer) {
-        const view = new DataView(buffer);
-        const msgType = view.getUint8(0);
-        if (msgType !== 0x01) return; // unknown — ignore
-        const nameLen = view.getUint16(1, false);
-        const nameBytes = new Uint8Array(buffer, 3, nameLen);
-        const cameraName = new TextDecoder().decode(nameBytes);
-        const jpegBytes = new Uint8Array(buffer, 3 + nameLen);
-        const blob = new Blob([jpegBytes], { type: "image/jpeg" });
-        const url = URL.createObjectURL(blob);
-        const img = document.getElementById("cameraImg");
-        const label = document.getElementById("cameraLabel");
-        if (img) {
-          img.src = url;
-          if (_lastCameraURL) URL.revokeObjectURL(_lastCameraURL);
-          _lastCameraURL = url;
-        }
-        if (label) label.textContent = cameraName;
-        const panel = document.getElementById("cameraPanel");
-        if (panel) {
-          panel.dataset.hasFrame = "true";
-          // First frame: auto-show the panel (and sync the toggle button).
-          if (panel.dataset.active !== "true") {
-            panel.dataset.active = "true";
-            const btn = document.getElementById("toggleCamera");
-            if (btn) btn.dataset.active = "true";
-          }
-        }
-      }
-
-      function installClickPublisher(socketRef) {
-        scene.onPointerObservable.add((pointerInfo) => {
-          if (pointerInfo.type !== BABYLON.PointerEventTypes.POINTERPICK) return;
-          const event = pointerInfo.event;
-          if (event.target !== canvas) return;
-
-          const publishNav = clickMode === "nav" || event.shiftKey;
-          const publishPoint = clickMode === "point" || event.altKey;
-          if (!publishNav && !publishPoint) return;
-
-          const socket = socketRef.current;
-          if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
-          if (publishNav) {
-            const ray = scene.createPickingRay(
-              scene.pointerX,
-              scene.pointerY,
-              BABYLON.Matrix.Identity(),
-              camera,
-            );
-            if (Math.abs(ray.direction.z) < 1e-6) return;
-            const distance = -ray.origin.z / ray.direction.z;
-            if (distance <= 0) return;
-            const point = ray.origin.add(ray.direction.scale(distance));
-            navGoalMarker = placeMarker(
-              navGoalMarker,
-              "navGoalMarker",
-              new BABYLON.Vector3(point.x, point.y, 0.08),
-              navMarkerMaterial,
-              0.22,
-            );
-            socket.send(
-              JSON.stringify({
-                type: "clicked_point",
-                point: [point.x, point.y, 0.0],
-              }),
-            );
-            setClickMode(null);
-            setStatus("nav target sent");
-            return;
-          }
-
-          const pick = pointerInfo.pickInfo;
-          let point = null;
-          if (pick && pick.hit && pick.pickedPoint) {
-            point = pick.pickedPoint;
-          } else {
-            const ray = scene.createPickingRay(
-              scene.pointerX,
-              scene.pointerY,
-              BABYLON.Matrix.Identity(),
-              camera,
-            );
-            if (Math.abs(ray.direction.z) < 1e-6) return;
-            const distance = (1.0 - ray.origin.z) / ray.direction.z;
-            if (distance <= 0) return;
-            point = ray.origin.add(ray.direction.scale(distance));
-          }
-          pointGoalMarker = placeMarker(
-            pointGoalMarker,
-            "pointGoalMarker",
-            point,
-            pointMarkerMaterial,
-            0.16,
-          );
-          socket.send(
-            JSON.stringify({
-              type: "point_goal",
-              point: [point.x, point.y, point.z],
-            }),
-          );
-          setClickMode(null);
-          setStatus("point target sent");
-        });
-      }
-
-      function installLabeledPointPublisher(socketRef) {
-        canvas.addEventListener("contextmenu", (event) => {
-          event.preventDefault();
-          const socket = socketRef.current;
-          if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
-          const pick = scene.pick(scene.pointerX, scene.pointerY);
-          let point;
-          if (pick && pick.hit && pick.pickedPoint) {
-            point = pick.pickedPoint;
-          } else {
-            const ray = scene.createPickingRay(
-              scene.pointerX,
-              scene.pointerY,
-              BABYLON.Matrix.Identity(),
-              camera,
-            );
-            if (Math.abs(ray.direction.z) < 1e-6) return;
-            const distance = -ray.origin.z / ray.direction.z;
-            if (distance <= 0) return;
-            point = ray.origin.add(ray.direction.scale(distance));
-          }
-
-          const label = window.prompt(
-            `Label this waypoint at (${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}):`,
-            "",
-          );
-          if (label === null) return;
-          const trimmed = label.trim();
-          if (!trimmed) return;
-
-          socket.send(
-            JSON.stringify({
-              type: "labeled_point",
-              label: trimmed,
-              point: [point.x, point.y, point.z],
-            }),
-          );
-          setStatus(`waypoint "${trimmed}" sent`);
-        });
-      }
-
-      document.getElementById("toggleScene").onclick = () => {
-        const visible = document.getElementById("toggleScene").dataset.active !== "true";
-        setSceneVisibility(visible);
-      };
-      document.getElementById("toggleRobot").onclick = () => {
-        const visible = document.getElementById("toggleRobot").dataset.active !== "true";
-        setRobotVisibility(visible);
-      };
-      document.getElementById("toggleDrive").onclick = () => setDriveEnabled(!driveEnabled);
-      document.getElementById("respawnRobot").onclick = () => {
-        sendDriveCommand(true);
-        sendSocketPayload({ type: "respawn" });
-        setStatus("respawn requested");
-      };
-      document.getElementById("toggleLidar").onclick = () => setLidarVisibility(!lidarVisible);
-      document.getElementById("toggleCamera").onclick = () => {
-        const btn = document.getElementById("toggleCamera");
-        const panel = document.getElementById("cameraPanel");
-        const active = btn.dataset.active !== "true";
-        btn.dataset.active = active ? "true" : "false";
-        if (panel) panel.dataset.active = active ? "true" : "false";
-      };
-      document.getElementById("navClick").onclick = () => setClickMode("nav");
-      document.getElementById("pointClick").onclick = () => setClickMode("point");
-      document.getElementById("toggleDepth").onclick = () => setSceneDepthWrite(!sceneDepthEnabled);
-      document.getElementById("toggleWire").onclick = () => setSceneWireframe(!sceneWireEnabled);
-      document.getElementById("forceVisible").onclick = () => setForceVisible(!forceVisibleEnabled);
-      document.getElementById("focusRobot").onclick = focusRobot;
-      document.getElementById("loadScene").onclick = () => {
-        if (!sceneConfig) return;
-        loadSceneAsset(sceneConfig).catch((error) => {
-          console.error(error);
-          setStatus("scene load failed");
-        });
-      };
-
-      // --- Policy arm / dry-run toggles ---
-      // Initial dataset.active reflects the coordinator's defaults for the
-      // typical real-hardware blueprint (unarmed, dry-run on). If the
-      // blueprint configured different defaults the button is still a plain
-      // toggle — click it once to sync.
-      document.getElementById("policyArm").onclick = () => {
-        const btn = document.getElementById("policyArm");
-        const engaged = btn.dataset.active !== "true";
-        if (!sendSocketPayload({ type: "set_activated", engaged })) return;
-        btn.dataset.active = engaged ? "true" : "false";
-        setStatus(engaged ? "policy armed" : "policy disarmed");
-      };
-      document.getElementById("policyDryRun").onclick = () => {
-        const btn = document.getElementById("policyDryRun");
-        const enabled = btn.dataset.active !== "true";
-        if (!sendSocketPayload({ type: "set_dry_run", enabled })) return;
-        btn.dataset.active = enabled ? "true" : "false";
-        setStatus(enabled ? "dry-run on" : "dry-run off (live)");
-      };
-
-      // --- Arm slider panel ---
-      // Toggle visibility
-      document.getElementById("armsToggle").onclick = () => {
-        const btn = document.getElementById("armsToggle");
-        const panel = document.getElementById("armsPanel");
-        const active = btn.dataset.active !== "true";
-        btn.dataset.active = active ? "true" : "false";
-        panel.dataset.active = active ? "true" : "false";
-      };
-
-      // Release: stop publishing arm commands (hand control back to MC)
-      document.getElementById("armsRelease").onclick = () => {
-        if (sendSocketPayload({ type: "release_arms" })) {
-          setStatus("arms released");
-        }
-      };
-
-      // Build the slider list from /arms.json. Each slider sends an
-      // {type: arm_joint, name, position} message on input (throttled).
-      function _humanLabel(name) {
-        // strip "left_"/"right_" prefix for column-internal display
-        return name
-          .replace(/^left_/, "")
-          .replace(/^right_/, "")
-          .replace(/_/g, " ");
-      }
-      // Track which slider the user is currently dragging so we don't
-      // overwrite its value from incoming joint-state updates.
-      const _armSliders = {};       // joint_name -> {slider, val, dragging}
-      let _armSendThrottle = {};
-      function _throttledSendJoint(name, position) {
-        const now = performance.now();
-        const last = _armSendThrottle[name] || 0;
-        if (now - last < 30) return; // ~33 Hz max per slider
-        _armSendThrottle[name] = now;
-        sendSocketPayload({ type: "arm_joint", name, position });
-      }
-      function _buildSlider(joint) {
-        const row = document.createElement("div");
-        row.className = "arm-slider-row";
-
-        const labelTop = document.createElement("div");
-        labelTop.className = "joint-name";
-        labelTop.textContent = _humanLabel(joint.name);
-        row.appendChild(labelTop);
-
-        const val = document.createElement("div");
-        val.className = "joint-val";
-        val.textContent = "  …  ";
-        row.appendChild(val);
-
-        const slider = document.createElement("input");
-        slider.type = "range";
-        slider.min = String(joint.min);
-        slider.max = String(joint.max);
-        slider.step = "0.005";
-        // Default to midpoint until we get a real reading — visually obvious
-        // it's not real yet (the value cell shows "..." until first update).
-        slider.value = String((joint.min + joint.max) / 2);
-        slider.disabled = true;  // enabled once a joint_state arrives
-
-        const entry = { slider, val, dragging: false, ready: false };
-        _armSliders[joint.name] = entry;
-
-        slider.addEventListener("pointerdown", () => { entry.dragging = true; });
-        slider.addEventListener("pointerup",   () => { entry.dragging = false; });
-        slider.addEventListener("pointercancel", () => { entry.dragging = false; });
-
-        slider.oninput = () => {
-          const pos = parseFloat(slider.value);
-          val.textContent = pos.toFixed(3);
-          _throttledSendJoint(joint.name, pos);
-        };
-        slider.onchange = () => {
-          // Final exact value on release (in case the throttle dropped it)
-          const pos = parseFloat(slider.value);
-          sendSocketPayload({ type: "arm_joint", name: joint.name, position: pos });
-        };
-        row.appendChild(slider);
-
-        const range = document.createElement("div");
-        range.className = "joint-range";
-        const lo = document.createElement("span");
-        lo.textContent = joint.min.toFixed(2);
-        const hi = document.createElement("span");
-        hi.textContent = joint.max.toFixed(2);
-        range.appendChild(lo);
-        range.appendChild(hi);
-        row.appendChild(range);
-
-        return row;
-      }
-
-      function _updateSlidersFromState(joints) {
-        if (!joints) return;
-        for (const [name, value] of Object.entries(joints)) {
-          const entry = _armSliders[name];
-          if (!entry) continue;
-          if (!entry.ready) {
-            // First sample → enable the slider, set it to actual position.
-            entry.ready = true;
-            entry.slider.disabled = false;
-          }
-          if (entry.dragging) continue;  // don't fight the user
-          // Only set value when the slider is idle, so the user sees ground truth.
-          entry.slider.value = String(value);
-          entry.val.textContent = Number(value).toFixed(3);
-        }
-      }
-
-      (async () => {
-        try {
-          const resp = await fetch("/arms.json");
-          const data = await resp.json();
-          const leftCol = document.getElementById("leftArmSliders");
-          const rightCol = document.getElementById("rightArmSliders");
-          for (const j of data.joints || []) {
-            const row = _buildSlider(j);
-            if (j.name.startsWith("left_")) leftCol.appendChild(row);
-            else if (j.name.startsWith("right_")) rightCol.appendChild(row);
-          }
-        } catch (e) {
-          console.error("Failed to load /arms.json:", e);
-        }
-      })();
-
-      const socketRef = { current: null };
-      (async () => {
-        try {
-          const config = await loadConfig();
-          sceneConfig = config;
-          if (useRobotMesh) await loadRobot();
-          connectWebSocket(socketRef);
-          installClickPublisher(socketRef);
-          installLabeledPointPublisher(socketRef);
-          // Sample Babylon's render FPS once a second and report it back so
-          // the server-side log shows the actual browser frame rate (useful
-          // when chasing scene-render slowness).
-          setInterval(() => {
-            const fps = engine.getFps();
-            if (Number.isFinite(fps) && fps > 0) {
-              sendSocketPayload({ type: "fps", value: Math.round(fps) });
-            }
-          }, 1000);
-          // POST a canvas snapshot to the server every 5 s so headless tools
-          // (curl /snapshot.jpg) can see what the real browser is rendering
-          // without needing macOS Screen Recording permission.
-          setInterval(() => {
-            canvas.toBlob(
-              (blob) => {
-                if (!blob) return;
-                fetch("/snapshot.jpg", { method: "POST", body: blob }).catch(() => {});
-              },
-              "image/jpeg",
-              0.7,
-            );
-          }, 5000);
-          setStatus("live");
-          if (sceneMode !== "0" && sceneMode !== "manual") {
-            window.setTimeout(() => loadSceneAsset(config).catch((error) => {
-              console.error(error);
-              setStatus("scene load failed");
-            }), 0);
-          }
-        } catch (error) {
-          console.error(error);
-          setStatus("load failed");
-        }
-      })();
-
-      window.addEventListener("keydown", (event) => {
-        const key = event.key.toLowerCase();
-        if (key === "shift") pressedKeys.add("shift");
-        if (key === " ") {
-          if (driveEnabled) sendDriveCommand(true);
-          event.preventDefault();
-          return;
-        }
-        if (!["w", "a", "s", "d", "q", "e"].includes(key)) return;
-        pressedKeys.add(key);
-        event.preventDefault();
-      });
-
-      window.addEventListener("keyup", (event) => {
-        const key = event.key.toLowerCase();
-        if (key === "shift") pressedKeys.delete("shift");
-        pressedKeys.delete(key);
-      });
-
-      window.addEventListener("blur", () => {
-        pressedKeys.clear();
-        sendDriveCommand(true);
-      });
-
-      function renderFrame() {
-        updateKeyboardCamera();
-        sendDriveCommand(false);
-        scene.render();
-      }
-
-      engine.runRenderLoop(renderFrame);
-      window.addEventListener("resize", () => engine.resize());
-    </script>
-  </body>
-</html>
-"""
