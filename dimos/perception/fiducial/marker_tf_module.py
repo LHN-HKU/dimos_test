@@ -21,10 +21,10 @@ lookups match marker poses in ``world``. Requires ``CameraInfo`` (``plumb_bob`` 
 empty distortion supported best; refine intrinsics on hardware when needed).
 Camera calibration runbook: ``docs/usage/camera_calibration.md``.
 
-The pose chain is ``base_link -> <optical> -> marker`` where ``<optical>`` is
+The pose chain is ``world -> <optical> -> marker`` where ``<optical>`` is
 ``Image.frame_id`` when set, else ``CameraInfo.frame_id``, else ``camera_optical``.
-That matches the frame the pixels live in. Then ``world -> base_link`` is applied
-before publishing the marker namespace.
+That matches the frame the pixels live in. The TF graph resolves ``world -> optical``
+in one lookup; the module no longer needs an intermediate ``base_link`` hop.
 
 OpenCV 4.7+ uses ``ArucoDetector``; pose uses ``solvePnP`` (``estimatePoseSingleMarkers``
 was removed in newer OpenCV builds).
@@ -190,7 +190,6 @@ class MarkerTfModuleConfig(ModuleConfig):
     """
 
     world_frame: str = "world"
-    base_frame: str = "base_link"
     markers_frame: str = "markers"
     marker_namespace_prefix: str | None = None
     aruco_dictionary: str = "DICT_APRILTAG_36h11"
@@ -262,31 +261,16 @@ class MarkerTfModule(Module):
 
         cam_mtx, dist = camera_info_to_cv_matrices(info)
         optical = _camera_optical_frame_id(image, info)
-        t_world_base = self.tf.get(
+        t_world_optical = self.tf.get(
             self.config.world_frame,
-            self.config.base_frame,
-            image.ts,
-            self.config.tf_lookup_tolerance,
-        )
-        if t_world_base is None:
-            logger.debug(
-                "MarkerTfModule: no TF %s -> %s at ts=%s",
-                self.config.world_frame,
-                self.config.base_frame,
-                image.ts,
-            )
-            return
-
-        t_base_optical = self.tf.get(
-            self.config.base_frame,
             optical,
             image.ts,
             self.config.tf_lookup_tolerance,
         )
-        if t_base_optical is None:
+        if t_world_optical is None:
             logger.debug(
                 "MarkerTfModule: no TF %s -> %s at ts=%s",
-                self.config.base_frame,
+                self.config.world_frame,
                 optical,
                 image.ts,
             )
@@ -323,8 +307,7 @@ class MarkerTfModule(Module):
                 child_frame_id="__marker_tmp",
                 ts=ts,
             )
-            t_base_marker = t_base_optical + t_optical_marker
-            t_world_marker = t_world_base + t_base_marker
+            t_world_marker = t_world_optical + t_optical_marker
             out.append(
                 Transform(
                     translation=t_world_marker.translation,
