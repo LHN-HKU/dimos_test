@@ -151,8 +151,9 @@ fn update_map(
             continue;
         }
         let endpoint = world_to_voxel(p.0, p.1, p.2, inv);
-        walk_ray(
+        find_misses_along_ray(
             &mut misses,
+            &map.voxels,
             origin,
             p,
             cfg.voxel_size,
@@ -168,6 +169,8 @@ fn update_map(
         let h = map.voxels.entry(*v).or_insert(cfg.min_health);
         *h = (*h + 1).min(cfg.max_health);
     }
+
+    // each miss is only checked once
     for v in misses.difference(&hits) {
         if let Some(h) = map.voxels.get_mut(v) {
             *h -= 1;
@@ -187,13 +190,12 @@ fn world_to_voxel(x: f32, y: f32, z: f32, inv: f32) -> VoxelKey {
     )
 }
 
-/// Amanatides & Woo 3-D DDA. Records every voxel strictly between
-/// `origin_voxel` and `endpoint` into `misses`, then continues past
-/// `endpoint` for `shadow_depth` meters and records those voxels too.
-/// The endpoint voxel itself is not added (it is a hit, handled by the
-/// caller).
-fn walk_ray(
+/// Amanatides & Woo 3-D DDA. Records voxels on ray in between the end of the shadow region
+/// and origin if it is in the map.
+#[allow(clippy::too_many_arguments)]
+fn find_misses_along_ray(
     misses: &mut AHashSet<VoxelKey>,
+    map_voxels: &AHashMap<VoxelKey, i32>,
     origin: (f32, f32, f32),
     end: (f32, f32, f32),
     voxel_size: f32,
@@ -292,7 +294,10 @@ fn walk_ray(
             }
         }
 
-        misses.insert((x, y, z));
+        // only add as a miss if there is a voxel in the map to decrement
+        if map_voxels.contains_key(&(x, y, z)) {
+            misses.insert((x, y, z));
+        }
     }
 }
 
@@ -441,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn walk_ray_hits_correct_voxels_1() {
+    fn find_misses_along_ray_hits_correct_voxels_1() {
         let voxel_size = 1.0;
         let shadow_depth = 2.0;
         let origin = (0.5, 0.5, 0.5);
@@ -449,17 +454,6 @@ mod tests {
         let inv = 1.0 / voxel_size;
         let origin_voxel = world_to_voxel(origin.0, origin.1, origin.2, inv);
         let endpoint = world_to_voxel(end.0, end.1, end.2, inv);
-
-        let mut misses: AHashSet<VoxelKey> = AHashSet::new();
-        walk_ray(
-            &mut misses,
-            origin,
-            end,
-            voxel_size,
-            shadow_depth,
-            origin_voxel,
-            endpoint,
-        );
 
         let expected: AHashSet<VoxelKey> = [
             (1, 0, 0),
@@ -471,22 +465,15 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        assert_eq!(misses, expected);
-    }
-
-    #[test]
-    fn walk_ray_hits_correct_voxels_2() {
-        let voxel_size = 1.0;
-        let shadow_depth = 2.0;
-        let origin = (0.5, 0.5, 0.5);
-        let end = (3.5, 2.5, 1.5);
-        let inv = 1.0 / voxel_size;
-        let origin_voxel = world_to_voxel(origin.0, origin.1, origin.2, inv);
-        let endpoint = world_to_voxel(end.0, end.1, end.2, inv);
+        let mut map_voxels: AHashMap<VoxelKey, i32> = AHashMap::new();
+        for v in &expected {
+            map_voxels.insert(*v, 1);
+        }
 
         let mut misses: AHashSet<VoxelKey> = AHashSet::new();
-        walk_ray(
+        find_misses_along_ray(
             &mut misses,
+            &map_voxels,
             origin,
             end,
             voxel_size,
@@ -494,6 +481,19 @@ mod tests {
             origin_voxel,
             endpoint,
         );
+
+        assert_eq!(misses, expected);
+    }
+
+    #[test]
+    fn find_misses_along_ray_hits_correct_voxels_2() {
+        let voxel_size = 1.0;
+        let shadow_depth = 2.0;
+        let origin = (0.5, 0.5, 0.5);
+        let end = (3.5, 2.5, 1.5);
+        let inv = 1.0 / voxel_size;
+        let origin_voxel = world_to_voxel(origin.0, origin.1, origin.2, inv);
+        let endpoint = world_to_voxel(end.0, end.1, end.2, inv);
 
         let expected: AHashSet<VoxelKey> = [
             (1, 0, 0),
@@ -507,6 +507,23 @@ mod tests {
         ]
         .into_iter()
         .collect();
+        let mut map_voxels: AHashMap<VoxelKey, i32> = AHashMap::new();
+        for v in &expected {
+            map_voxels.insert(*v, 1);
+        }
+
+        let mut misses: AHashSet<VoxelKey> = AHashSet::new();
+        find_misses_along_ray(
+            &mut misses,
+            &map_voxels,
+            origin,
+            end,
+            voxel_size,
+            shadow_depth,
+            origin_voxel,
+            endpoint,
+        );
+
         assert_eq!(misses, expected);
     }
 
