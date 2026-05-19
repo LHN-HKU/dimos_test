@@ -63,20 +63,6 @@ teleop_quest_xarm7 = autoconnect(
 )
 
 
-# Single XArm7 teleop in MuJoCo sim
-teleop_quest_xarm7_sim = autoconnect(
-    ArmTeleopModule.blueprint(task_names={"right": "teleop_xarm"}),
-    coordinator_teleop_sim_xarm7,
-).transports(
-    {
-        ("right_controller_output", PoseStamped): LCMTransport(
-            "/coordinator/cartesian_command", PoseStamped
-        ),
-        ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
-    }
-)
-
-
 class TeleopRecorderConfig(RecorderConfig):
     db_path: str | Path = "recording_teleop.db"
 
@@ -84,7 +70,7 @@ class TeleopRecorderConfig(RecorderConfig):
 class TeleopRecorder(Recorder):
     """Records right-controller pose and button state from any quest teleop blueprint.
 
-    Compose at the CLI: ``dimos run teleop-quest-xarm7-sim teleop-recorder``.
+    Compose at the CLI: ``dimos run teleop-quest-xarm7 teleop-recorder``.
     """
 
     right_controller_output: In[PoseStamped]

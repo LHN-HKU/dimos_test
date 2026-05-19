@@ -39,7 +39,7 @@ Usage
 
 2. Run dimos pointing at this broker::
 
-       dimos run teleop-hosted-xarm7-sim \\
+       dimos run teleop-hosted-xarm7 \\
          --hosted-arm-teleop-module.broker-url=http://localhost:8000 \\
          --hosted-arm-teleop-module.robot-id=test-robot \\
          --hosted-arm-teleop-module.robot-name="Test XArm7"
