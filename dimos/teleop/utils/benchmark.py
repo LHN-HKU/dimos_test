@@ -129,7 +129,7 @@ class StreamStats:
     """
 
     def __init__(self, stall_factor: float = 3.0) -> None:
-        """``stall_factor`` — an arrival gap longer than ``stall_factor`` ×
+        """``stall_factor`` — an arrival gap longer than ``stall_factor`` x the
         median inter-arrival interval counts as a stall.
         """
         self.stall_factor = stall_factor
@@ -223,7 +223,7 @@ class TeleopBenchmarkConfig(ModuleConfig):
     """Rolling window the live line is computed over."""
 
     stall_factor: float = 3.0
-    """Arrival gap > factor × median interval counts as a stall."""
+    """Arrival gap > factor x median interval counts as a stall."""
 
     out_dir: str = "data/hosted_teleop/reports"
     """Reports are written to ``out_dir/<timestamp>/`` (relative to repo root)."""
