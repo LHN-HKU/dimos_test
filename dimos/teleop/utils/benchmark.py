@@ -98,8 +98,7 @@ def _reorder_count(seqs: list[int]) -> int:
 
 
 def _classify_e2e(p50_ms: float) -> str:
-    """Map an E2E p50 latency to an acceptance band label.
-    """
+    """Map an E2E p50 latency to an acceptance band label."""
     if p50_ms < 0:
         return "clock skew"
     for threshold, label in _E2E_BANDS:
