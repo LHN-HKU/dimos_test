@@ -22,12 +22,13 @@ deltas, and publishes PoseStamped commands.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 import threading
 import time
-from typing import Any, AsyncIterator, TypeVar
+from typing import Any, TypeVar
 
 import cv2
 from dimos_lcm.geometry_msgs import PoseStamped as LCMPoseStamped
@@ -189,8 +190,7 @@ class QuestTeleopModule(Module):
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n"
-                    b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
-                    + jpeg + b"\r\n"
+                    b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
                 )
             await asyncio.sleep(period)
 
