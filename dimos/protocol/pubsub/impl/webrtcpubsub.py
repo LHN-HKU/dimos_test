@@ -123,13 +123,24 @@ except ImportError:
     CloudflareProvider = None  # type: ignore[assignment,misc]
     CLOUDFLARE_AVAILABLE = False
 
+try:
+    from dimos.protocol.pubsub.impl.webrtc_providers.broker import (
+        BROKER_AVAILABLE,
+        BrokerProvider,
+    )
+except ImportError:
+    BROKER_AVAILABLE = False  # type: ignore[assignment]
+    BrokerProvider = None  # type: ignore[assignment,misc]
+
 
 # Convenience alias matching old API
 CloudflareSession = CloudflareProvider
 
 
 __all__ = [
+    "BROKER_AVAILABLE",
     "WEBRTC_AVAILABLE",
+    "BrokerProvider",
     "CloudflareProvider",
     "CloudflareSession",
     "DataChannelProvider",

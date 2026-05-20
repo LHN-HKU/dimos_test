@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
@@ -285,12 +285,82 @@ try:
     from dimos.protocol.pubsub.impl.webrtc_providers.cloudflare import CloudflareProvider
     from dimos.protocol.pubsub.impl.webrtcpubsub import (
         WEBRTC_AVAILABLE,
+        DataChannelProvider,
         WebRTCPubSub,
     )
 except ImportError:  # pragma: no cover
     WEBRTC_AVAILABLE = False
     WebRTCPubSub = None  # type: ignore[assignment,misc]
     CloudflareProvider = None  # type: ignore[assignment,misc]
+    DataChannelProvider = None  # type: ignore[assignment,misc]
+
+
+# ─── WebRTC local loopback (no network, measures encode/dispatch overhead) ───
+
+if WEBRTC_AVAILABLE:
+
+    class _LoopbackProvider(DataChannelProvider):  # type: ignore[misc]
+        """In-process loopback DataChannelProvider for benchmarking.
+
+        No network, no aiortc, no Cloudflare — messages are delivered
+        synchronously in the same thread. This benchmarks the WebRTC
+        transport/pubsub dispatch overhead in isolation.
+        """
+
+        def __init__(self) -> None:
+            self._started = False
+            self._subscribers: dict[str, list[Callable[[bytes, str], None]]] = {}
+
+        @property
+        def is_connected(self) -> bool:
+            return self._started
+
+        def start(self) -> None:
+            self._started = True
+
+        def stop(self) -> None:
+            self._started = False
+
+        def publish(self, topic: str, data: bytes) -> None:
+            for cb in list(self._subscribers.get(topic, [])):
+                cb(data, topic)
+
+        def subscribe(
+            self, topic: str, callback: Callable[[bytes, str], None]
+        ) -> Callable[[], None]:
+            self._subscribers.setdefault(topic, []).append(callback)
+
+            def _unsub() -> None:
+                try:
+                    self._subscribers[topic].remove(callback)
+                except (ValueError, KeyError):
+                    pass
+
+            return _unsub
+
+    @contextmanager
+    def webrtc_loopback_pubsub_channel() -> Generator["WebRTCPubSub", None, None]:
+        """WebRTC PubSub with in-process loopback (no network)."""
+        provider = _LoopbackProvider()
+        pubsub = WebRTCPubSub(provider=provider)
+        pubsub.start()
+        try:
+            yield pubsub
+        finally:
+            pubsub.stop()
+
+    def webrtc_loopback_msggen(size: int) -> tuple[str, bytes]:
+        return ("benchmark/webrtc_loopback", make_data_bytes(size))
+
+    testcases.append(
+        Case(
+            pubsub_context=webrtc_loopback_pubsub_channel,
+            msg_gen=webrtc_loopback_msggen,
+        )
+    )
+
+
+# ─── WebRTC via Cloudflare Realtime SFU (requires credentials) ───────
 
 if (
     WEBRTC_AVAILABLE
