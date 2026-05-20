@@ -46,7 +46,7 @@ logger = setup_logger()
 class MlsPlannerConfig(ModuleConfig):
     world_frame: str = "world"
     voxel_size: float = 0.1
-    robot_height: float = 0.75  # m
+    robot_height: float = 0.5  # m
     max_step_height: float = 0.15  # m — largest step the robot can climb between adjacent surfaces
 
 
@@ -68,6 +68,7 @@ class MlsPlanner(Module):
         self._lock = threading.Lock()
         self._latest_odom: Odometry | None = None
         self._latest_mls: MLS | None = None
+        self._latest_goal: PoseStamped | None = None
 
     @rpc
     def start(self) -> None:
@@ -91,13 +92,21 @@ class MlsPlanner(Module):
         with self._lock:
             self._latest_mls = mls
         self._publish_surfaces(mls)
+        # Re-plan against the cached goal in case it arrived before this map
+        # finished processing (race when multi-scene tests cycle inputs).
+        self._maybe_replan()
 
     def _on_goal(self, goal: PoseStamped) -> None:
         with self._lock:
+            self._latest_goal = goal
+        self._maybe_replan()
+
+    def _maybe_replan(self) -> None:
+        with self._lock:
             odom = self._latest_odom
             mls = self._latest_mls
-        if odom is None or mls is None:
-            logger.warning("MlsPlanner: goal received before odom/map; ignoring")
+            goal = self._latest_goal
+        if odom is None or mls is None or goal is None:
             return
         path = self._plan(mls, odom, goal)
         if path is not None:

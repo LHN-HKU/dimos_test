@@ -27,7 +27,11 @@ from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.modules.mls_planner.module import MlsPlanner
-from dimos.navigation.nav_stack.tests.evaluator import Evaluator, default_scene
+from dimos.navigation.nav_stack.tests.evaluator import (
+    Evaluator,
+    default_scene,
+    spiral_staircase_scene,
+)
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 
 
@@ -41,7 +45,7 @@ def _render_path(msg: Path) -> Any:
 
 def build_blueprint() -> Blueprint:
     return autoconnect(
-        Evaluator.blueprint(scene=default_scene()),
+        Evaluator.blueprint(scenes=[default_scene(), spiral_staircase_scene()]),
         MlsPlanner.blueprint(),
         RerunBridgeModule.blueprint(
             visual_override={

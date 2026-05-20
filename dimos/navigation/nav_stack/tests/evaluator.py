@@ -114,6 +114,72 @@ def _box_shell(
     return np.concatenate(faces, axis=0)
 
 
+def spiral_staircase_scene(voxel_size: float = 0.1) -> Scene:
+    """Three-flight spiral staircase; flight 3 sits directly above flight 1.
+
+    Floor at z=0. Flight 1 climbs +y from z_voxel=1 to 10 in x∈[0,1]. Landing 1
+    is a flat platform at z_voxel=10 spanning x∈[-1,1]. Flight 2 reverses, climbing
+    -y from z_voxel=11 to 20 in x∈[-1,0]. Landing 2 at z_voxel=20 spans x∈[-1,1].
+    Flight 3 reverses again, climbing +y from z_voxel=21 to 30 in x∈[0,1] — same
+    (x,y) footprint as flight 1, two flights' worth of z above it.
+
+    Each step is a single-voxel-thick floating patch (visible from above and
+    below via lidar). Robot starts on the floor and must spiral up to the goal
+    at the top of flight 3.
+
+    Flight 2's x range is shifted to overlap the +x half of flights 1 and 3 by
+    0.5m, so columns in x∈[0, 0.5] carry voxels from all three flights at
+    different z levels — a true 3-level overhang test for the column walker.
+    """
+    step_depth = 0.2  # 2 voxels per step in y
+    flight_x_a = (0.0, 1.0)  # flights 1 and 3 (same footprint)
+    flight_x_b = (-0.5, 0.5)  # flight 2 (overlaps +x half of A by 0.5m)
+
+    def _flight(
+        x_extent: tuple[float, float], y0: float, climb_sign: int, z_base_voxel: int
+    ) -> list[np.ndarray]:
+        """10 single-voxel-layer steps; climb_sign=+1 climbs +y, -1 climbs -y."""
+        out: list[np.ndarray] = []
+        for k in range(1, 11):
+            y_lo = y0 + climb_sign * (k - 1) * step_depth
+            y_hi = y0 + climb_sign * k * step_depth
+            ymin, ymax = (y_lo, y_hi) if y_lo < y_hi else (y_hi, y_lo)
+            z_voxel = z_base_voxel + k  # step k's top voxel
+            out.append(
+                _flat_floor(
+                    voxel_size,
+                    extent=(*x_extent, ymin, ymax),
+                    z=z_voxel * voxel_size,
+                )
+            )
+        return out
+
+    parts: list[np.ndarray] = []
+    # Flight 1: from y=0 climbing +y to y=2, z_voxel 1..10.
+    parts.extend(_flight(flight_x_a, y0=0.0, climb_sign=+1, z_base_voxel=0))
+    # Landing 1: y in [2, 3] at z_voxel=10, spans both flights' x ranges.
+    parts.append(_flat_floor(voxel_size, extent=(-1.0, 1.0, 2.0, 3.0), z=10 * voxel_size))
+    # Flight 2: from y=3 climbing -y to y=1, z_voxel 11..20.
+    parts.extend(_flight(flight_x_b, y0=3.0, climb_sign=-1, z_base_voxel=10))
+    # Landing 2: y in [0, 1] at z_voxel=20.
+    parts.append(_flat_floor(voxel_size, extent=(-1.0, 1.0, 0.0, 1.0), z=20 * voxel_size))
+    # Flight 3: from y=0 climbing +y to y=2, z_voxel 21..30 — directly above flight 1.
+    parts.extend(_flight(flight_x_a, y0=0.0, climb_sign=+1, z_base_voxel=20))
+
+    # Floor everywhere. No holes — lidar sees through gaps between floating steps.
+    parts.append(_flat_floor(voxel_size, extent=(-5.0, 5.0, -5.0, 5.0)))
+
+    voxels = np.concatenate(parts, axis=0).astype(np.float32)
+    return Scene(
+        voxels=voxels,
+        voxel_size=voxel_size,
+        start_position=(-3.0, 0.0, 0.5),
+        # Top of flight 3 (step 10) at (x=0.5, y=1.9, z_voxel=30).
+        goal_position=(0.5, 1.9, 3.5),
+        name="spiral_staircase",
+    )
+
+
 def default_scene(voxel_size: float = 0.1) -> Scene:
     """Lidar-realistic shell scene: floor + tall central box + ramp + bridge.
 
@@ -208,38 +274,49 @@ class Evaluator(Module):
     goal: Out[PoseStamped]
     path: In[Path]
 
-    def __init__(self, scene: Scene | None = None, **kwargs: Any) -> None:
+    def __init__(self, scenes: list[Scene] | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._scene: Scene = scene if scene is not None else default_scene()
+        self._scenes: list[Scene] = scenes if scenes else [default_scene()]
+        self._index: int = 0
         self._lock = threading.Lock()
 
     @rpc
     def start(self) -> None:
         super().start()
         self.register_disposable(Disposable(self.path.subscribe(self._on_path)))
-        self.register_disposable(interval(self.config.publish_period).subscribe(self._publish_all))
-        logger.info("Evaluator started with scene=%s", self._scene.name)
+        self.register_disposable(interval(self.config.publish_period).subscribe(self._publish_next))
+        logger.info("Evaluator started with %d scene(s)", len(self._scenes))
 
     @rpc
     def stop(self) -> None:
         super().stop()
 
-    def _publish_all(self, _: Any) -> None:
-        self._publish_map()
-        self._publish_odom()
-        self._publish_goal()
+    def _publish_next(self, _: Any) -> None:
+        if self._index >= len(self._scenes):
+            return  # All scenes exhausted; stop publishing.
+        scene = self._scenes[self._index]
+        logger.info(
+            "Evaluator publishing scene %d/%d: %s",
+            self._index + 1,
+            len(self._scenes),
+            scene.name,
+        )
+        self._publish_map(scene)
+        self._publish_odom(scene)
+        self._publish_goal(scene)
+        self._index += 1
 
-    def _publish_map(self) -> None:
+    def _publish_map(self, scene: Scene) -> None:
         cloud = PointCloud2.from_numpy(
-            points=self._scene.voxels,
+            points=scene.voxels,
             frame_id=self.config.world_frame,
             timestamp=time.time(),
         )
         self.global_map.publish(cloud)
 
-    def _publish_odom(self) -> None:
-        x, y, z = self._scene.start_position
-        qx, qy, qz, qw = self._scene.start_orientation
+    def _publish_odom(self, scene: Scene) -> None:
+        x, y, z = scene.start_position
+        qx, qy, qz, qw = scene.start_orientation
         odom = Odometry(
             ts=time.time(),
             frame_id=self.config.world_frame,
@@ -248,9 +325,9 @@ class Evaluator(Module):
         )
         self.odometry.publish(odom)
 
-    def _publish_goal(self) -> None:
-        x, y, z = self._scene.goal_position
-        qx, qy, qz, qw = self._scene.goal_orientation
+    def _publish_goal(self, scene: Scene) -> None:
+        x, y, z = scene.goal_position
+        qx, qy, qz, qw = scene.goal_orientation
         goal = PoseStamped(
             ts=time.time(),
             frame_id=self.config.world_frame,
@@ -258,7 +335,6 @@ class Evaluator(Module):
             orientation=Quaternion(qx, qy, qz, qw),
         )
         self.goal.publish(goal)
-        logger.info("Evaluator published goal at %s", self._scene.goal_position)
 
     def _on_path(self, path: Path) -> None:
         n = len(path.poses)
