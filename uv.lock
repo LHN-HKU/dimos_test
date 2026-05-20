@@ -39,6 +39,10 @@ resolution-markers = [
     "(python_full_version < '3.11' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.11' and platform_machine != 'x86_64' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 
+[options]
+exclude-newer = "2026-05-09T15:39:50.162457Z"
+exclude-newer-span = "P7D"
+
 [manifest]
 overrides = [
     { name = "pillow", specifier = ">=12.2.0" },
@@ -2554,7 +2558,7 @@ tests = [
     { name = "langchain-core", specifier = "==1.3.3" },
     { name = "langchain-openai", specifier = ">=1,<2" },
     { name = "lap", specifier = ">=0.5.12" },
-    { name = "md-babel-py", specifier = ">=1.1.4" },
+    { name = "md-babel-py", specifier = ">=1.2.0" },
     { name = "moondream" },
     { name = "mujoco", specifier = ">=3.3.4" },
     { name = "ollama", specifier = ">=0.6.0" },
@@ -2596,7 +2600,7 @@ tests-self-hosted = [
     { name = "langchain-core", specifier = "==1.3.3" },
     { name = "langchain-openai", specifier = ">=1,<2" },
     { name = "lap", specifier = ">=0.5.12" },
-    { name = "md-babel-py", specifier = ">=1.1.4" },
+    { name = "md-babel-py", specifier = ">=1.2.0" },
     { name = "moondream" },
     { name = "mujoco", specifier = ">=3.3.4" },
     { name = "ollama", specifier = ">=0.6.0" },
@@ -5425,11 +5429,11 @@ wheels = [
 
 [[package]]
 name = "md-babel-py"
-version = "1.1.5"
+version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b5/ed/388b9934c3909628e7a8a170ba28dd5aae90e030f33a7b195741ed3dfc4c/md_babel_py-1.1.5.tar.gz", hash = "sha256:41e99bea074e4d68905d42bb57f14ca00b414e592b69fdfa3ec19db47b5de5c9", size = 31279, upload-time = "2026-05-06T08:53:14.748Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/1a/3c63129fc2fef99ff3282a5d04bb179d004f887f8c919d3642a1a904c6bc/md_babel_py-1.2.0.tar.gz", hash = "sha256:946987e1473c78812acb02f0dfb9f92b513fbdfaf58b29ce5e529e7a88794262", size = 35734, upload-time = "2026-05-15T13:19:27.783Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/52/5de9991c4cb87ea596988c1db51053b73a32763d96581751ae16cb46ef60/md_babel_py-1.1.5-py3-none-any.whl", hash = "sha256:9167f216d9875ae2d93aab33d0fc4cca80a94953b2f99e5dc2eab2fc896ba8e7", size = 26297, upload-time = "2026-05-06T08:53:13.181Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/94/1703920cba5bc4e66453e6cd65f14cb5bf3cea4e21bc690d636c24ac0f1c/md_babel_py-1.2.0-py3-none-any.whl", hash = "sha256:190373a0f5daf77c0fdc01e7486c761676d9b35cb31aca41193a1f6612334186", size = 30090, upload-time = "2026-05-15T13:19:26.593Z" },
 ]
 
 [[package]]
