@@ -33,8 +33,9 @@ import cv2
 from dimos_lcm.geometry_msgs import PoseStamped as LCMPoseStamped
 from dimos_lcm.sensor_msgs import Joy as LCMJoy
 from fastapi import WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
@@ -178,14 +179,6 @@ class QuestTeleopModule(Module):
                 media_type="multipart/x-mixed-replace; boundary=frame",
             )
 
-        @self._web_server.app.get("/snapshot")
-        async def snapshot() -> Response:
-            with self._image_lock:
-                jpeg = self._latest_jpeg
-            if jpeg is None:
-                return Response(status_code=204)
-            return Response(content=jpeg, media_type="image/jpeg")
-
     async def _mjpeg_stream(self) -> AsyncIterator[bytes]:
         """Yield multipart MJPEG frames at video_fps from the latest JPEG cache."""
         period = 1.0 / max(1.0, self.config.video_fps)
@@ -220,11 +213,11 @@ class QuestTeleopModule(Module):
         super().start()
         self._start_server()
         self._start_control_loop()
-        # Optional: subscribe to camera feed if connected by the blueprint.
-        try:
-            self.color_image.subscribe(self._on_image)
+        # Subscribe to camera feed only if the blueprint wired one up.
+        if self.color_image._transport is not None:
+            self.register_disposable(Disposable(self.color_image.subscribe(self._on_image)))
             logger.info("Quest teleop: camera feed subscribed → /video")
-        except Exception:
+        else:
             logger.info("Quest teleop: no camera connected, /video will be empty")
         logger.info("Quest Teleoperation Module started")
 

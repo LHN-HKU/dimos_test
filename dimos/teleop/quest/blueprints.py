@@ -56,6 +56,7 @@ teleop_quest_xarm7 = autoconnect(
             "/coordinator/cartesian_command", PoseStamped
         ),
         ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
+        ("color_image", Image): LCMTransport("/teleop/color_image", Image),
     }
 )
 
