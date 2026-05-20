@@ -71,66 +71,30 @@ logger = setup_logger()
 
 @dataclass
 class TaskConfig:
-    """Configuration for a control task.
-
-    Attributes:
-        name: Task name (e.g., "traj_arm")
-        type: Registered task type name. See ``dimos.control.tasks.registry``.
-        joint_names: List of joint names this task controls
-        priority: Task priority (higher wins arbitration)
-        model_path: Optional model path used by task factories that need one.
-        ee_joint_id: End-effector joint ID in model (cartesian_ik/teleop_ik only)
-        hand: "left" or "right" controller hand (teleop_ik only)
-        gripper_joint: Joint name for gripper virtual joint
-        gripper_open_pos: Gripper position at trigger 0.0
-        gripper_closed_pos: Gripper position at trigger 1.0
-        hardware_id: Optional hardware dependency used by task factories.
-    """
+    """Configuration for a registered control task."""
 
     name: str
     type: str = "trajectory"
     joint_names: list[str] = field(default_factory=lambda: [])
     priority: int = 10
-    # Cartesian IK / Teleop IK / GR00T WBC specific
+    # Task-specific optional fields. Factories decide which fields they use.
     model_path: str | Path | None = None
     ee_joint_id: int = 6
     hand: Literal["left", "right"] | None = None  # teleop_ik only
-    # Teleop IK gripper specific
     gripper_joint: str | None = None
     gripper_open_pos: float = 0.0
     gripper_closed_pos: float = 0.0
-    # For tasks that need access to a configured hardware adapter.
     hardware_id: str | None = None
-    # Servo task: optional initial target held until/unless a new one arrives.
     default_positions: list[float] | None = None
-    # Start the task immediately after registration.
     auto_start: bool = False
-    # For tasks with arm()/disarm(): arm automatically on start.
     auto_arm: bool = False
-    # For tasks with dry-run support: compute but suppress output on start.
     auto_dry_run: bool = False
-    # Default arming ramp duration, for tasks that interpolate on arm().
     default_ramp_seconds: float = 10.0
-    # Optional task-level compute decimation; ``None`` keeps the task default.
     decimation: int | None = None
 
 
 class ControlCoordinatorConfig(ModuleConfig):
-    """Configuration for the ControlCoordinator.
-
-    Attributes:
-        tick_rate: Control loop frequency in Hz (default: 100)
-        publish_joint_state: Whether to publish aggregated JointState
-        joint_state_frame_id: Frame ID for published JointState
-        log_ticks: Whether to log tick information (verbose)
-        hardware: List of hardware configurations to create on start
-        tasks: List of task configurations to create on start
-
-    Odom is no longer published here — most ``WholeBodyAdapter`` impls
-    don't (and shouldn't) produce base pose. Sim engines publish odom
-    on their own Out port; real-hardware setups attach a dedicated
-    estimator Module that fuses IMU + leg kinematics.
-    """
+    """Configuration for the ControlCoordinator."""
 
     tick_rate: float = 100.0
     publish_joint_state: bool = True
@@ -286,18 +250,7 @@ class ControlCoordinator(Module):
         )
 
     def _create_whole_body_adapter(self, component: HardwareComponent) -> WholeBodyAdapter:
-        """Create a whole-body adapter from component config.
-
-        ``component.address`` is the universal hardware-locator field.
-        It carries the DDS network interface for real-hw adapters (e.g.
-        ``"enp2s0"``) and the MJCF path for sim adapters — each adapter
-        knows how to interpret a string vs. an integer in its own
-        ``__init__``. Adapters that need extra arguments accept them via
-        ``**component.adapter_kwargs``. This unification (vs. the earlier
-        dual ``address`` + ``network_interface``) matches the convention
-        used by ``_create_manipulator_adapter`` and
-        ``_create_twist_base_adapter``.
-        """
+        """Create a whole-body adapter from component config."""
         from dimos.hardware.whole_body.registry import whole_body_adapter_registry
 
         return whole_body_adapter_registry.create(
@@ -310,11 +263,7 @@ class ControlCoordinator(Module):
         )
 
     def _create_task_from_config(self, cfg: TaskConfig) -> ControlTask:
-        """Create a control task from config via the task registry.
-
-        Each task module self-registers a factory under its type name.
-        Factories can resolve hardware dependencies from the hardware map.
-        """
+        """Create a control task from config via the task registry."""
         from dimos.control.tasks.registry import control_task_registry
 
         return control_task_registry.create(cfg.type, cfg, hardware=self._hardware)

@@ -19,10 +19,11 @@ One blueprint, ``--simulation`` flag picks the backend:
 Real hardware (default):
     G1WholeBodyConnection (DDS rt/lowstate <-> rt/lowcmd) + transport_lcm
     whole-body adapter. 500 Hz tick. Safety profile: unarmed + dry-run on
-    start; the operator clicks Activate in the dashboard at :7779 and the
-    policy ramps from the current pose to its bent-knee default over 10 s
-    before taking torque control. The 14 arm joints are held at the
-    relaxed GR00T-trained default via a lower-priority servo task.
+    start; activate explicitly through ControlCoordinator RPC after
+    verifying commands. The policy ramps from the current pose to its
+    bent-knee default over 10 s before taking torque control. The 14 arm
+    joints are held at the relaxed GR00T-trained default via a lower-priority
+    servo task.
 
 Sim (``--simulation``):
     MujocoSimModule (in-process MuJoCo + SHM) + sim_mujoco_g1 adapter.
@@ -66,10 +67,7 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
-from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
-from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
 from dimos.utils.data import LfsPath
-from dimos.web.websocket_vis.websocket_vis_module import WebsocketVisModule
 
 # Lazy data handles. LfsPath only triggers the LFS pull on first
 # str()/open(); using ``get_data(...)`` at import time would block the
@@ -80,6 +78,8 @@ _MJCF_PATH = LfsPath("mujoco_sim/g1_gear_wbc.xml")
 _adapter_address: str | Path
 
 if global_config.simulation:
+    from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+
     # Sim backend: MuJoCo engine via SHM.
     _backend = MujocoSimModule.blueprint(
         address=_MJCF_PATH,
@@ -105,6 +105,8 @@ if global_config.simulation:
     # servo task needed.
     _arm_holder: TaskConfig | None = None
 else:
+    from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
+
     # Real-hw backend: DDS connection module + transport_lcm adapter.
     _backend = G1WholeBodyConnection.blueprint(release_sport_mode=True)
     _adapter_type = "transport_lcm"
@@ -174,13 +176,6 @@ _coordinator = ControlCoordinator.blueprint(
     }
 )
 
-# Operator dashboard at http://localhost:7779/ -- Arm/Disarm + Dry-Run
-# buttons call ControlCoordinator.set_activated() / .set_dry_run()
-# directly via RPC (no LCM round-trip).
-_ws_vis = WebsocketVisModule.blueprint().transports(
-    {("tele_cmd_vel", Twist): LCMTransport("/g1/cmd_vel", Twist)}
-)
-
-unitree_g1_groot_wbc = autoconnect(_backend, _coordinator, _ws_vis)
+unitree_g1_groot_wbc = autoconnect(_backend, _coordinator)
 
 __all__ = ["unitree_g1_groot_wbc"]

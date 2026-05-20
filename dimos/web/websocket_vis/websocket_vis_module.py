@@ -107,7 +107,6 @@ class WebsocketVisModule(Module):
     stop_explore_cmd: Out[Bool]
     tele_cmd_vel: Out[Twist]
     movecmd_stamped: Out[TwistStamped]
-    # Arm/disarm/dry-run are one-shot coordinator RPCs, not output streams.
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize the WebSocket visualization module.
@@ -130,32 +129,9 @@ class WebsocketVisModule(Module):
 
         # Track GPS goal points for visualization
         self.gps_goal_points: list[dict[str, float]] = []
-
-        # Lazy-initialised RPC client to ControlCoordinator. Used by the
-        # dashboard's arm/disarm/set_dry_run buttons which call the
-        # coordinator's @rpc set_activated / set_dry_run directly (no
-        # stream round-trip — arming is one-shot).
-        self._coordinator_client: Any | None = None
-
         logger.info(
             f"WebSocket visualization module initialized on port {self.config.port}, GPS goal tracking enabled"
         )
-
-    def _get_coordinator_client(self) -> Any | None:
-        """Lazy-init RPC client to ControlCoordinator. Returns None and
-        warns once if the coordinator isn't reachable (e.g. ws_vis is
-        being used in a blueprint that has no coordinator). Mirrors the
-        pattern in ``G1ManipulationModule._get_coordinator_client``."""
-        if self._coordinator_client is None:
-            try:
-                from dimos.control.coordinator import ControlCoordinator
-                from dimos.core.rpc_client import RPCClient
-
-                self._coordinator_client = RPCClient(None, ControlCoordinator)
-            except Exception as e:
-                logger.warning(f"ControlCoordinator RPC unreachable: {e}")
-                return None
-        return self._coordinator_client
 
     def _start_broadcast_loop(self) -> None:
         def websocket_vis_loop() -> None:
@@ -171,12 +147,6 @@ class WebsocketVisModule(Module):
         self._broadcast_thread = threading.Thread(target=websocket_vis_loop, daemon=True)  # type: ignore[assignment]
         self._broadcast_thread.start()  # type: ignore[attr-defined]
 
-    def _uses_rerun_web(self) -> bool:
-        rerun_open = getattr(self.config.g, "rerun_open", "native")
-        return self.config.g.viewer == "rerun-web" or (
-            self.config.g.viewer == "rerun" and rerun_open in ("web", "both")
-        )
-
     @rpc
     def start(self) -> None:
         super().start()
@@ -189,7 +159,7 @@ class WebsocketVisModule(Module):
         self._uvicorn_server_thread.start()
 
         # Only auto-open when the user chose web-based viewing.
-        if self._uses_rerun_web():
+        if self.config.g.viewer == "rerun" and self.config.g.rerun_open in ("web", "both"):
             url = f"http://localhost:{self.config.port}/"
             logger.info(f"Dimensional Command Center: {url}")
 
@@ -265,7 +235,9 @@ class WebsocketVisModule(Module):
 
         async def serve_index(request):  # type: ignore[no-untyped-def]
             """Serve appropriate HTML based on viewer mode."""
-            if not self._uses_rerun_web():
+            if not (
+                self.config.g.viewer == "rerun" and self.config.g.rerun_open in ("web", "both")
+            ):
                 return RedirectResponse(url="/command-center")
             return FileResponse(_DASHBOARD_HTML, media_type="text/html")
 
@@ -355,41 +327,6 @@ class WebsocketVisModule(Module):
             if self.sio is not None:
                 await self.sio.emit("gps_travel_goal_points", self.gps_goal_points)
             logger.info("GPS goal points cleared and updated clients")
-
-        @self.sio.event  # type: ignore[untyped-decorator]
-        async def arm(sid: str, data: dict[str, Any] | None = None) -> None:
-            """Dashboard → arm the locomotion policy (with ramp)."""
-            client = self._get_coordinator_client()
-            if client is None:
-                logger.warning("arm requested but ControlCoordinator RPC is unavailable")
-                return
-            logger.info("Dashboard requested arm")
-            client.set_activated(engaged=True)
-
-        @self.sio.event  # type: ignore[untyped-decorator]
-        async def disarm(sid: str, data: dict[str, Any] | None = None) -> None:
-            """Dashboard → disarm; task falls back to hold-current-pose."""
-            client = self._get_coordinator_client()
-            if client is None:
-                logger.warning("disarm requested but ControlCoordinator RPC is unavailable")
-                return
-            logger.info("Dashboard requested disarm")
-            client.set_activated(engaged=False)
-
-        @self.sio.event  # type: ignore[untyped-decorator]
-        async def set_dry_run(sid: str, data: dict[str, Any] | None = None) -> None:
-            """Dashboard → toggle dry-run on the locomotion policy.
-
-            Payload: ``{"enabled": bool}``.  Task still computes but
-            coordinator sends nothing to the adapter when enabled.
-            """
-            client = self._get_coordinator_client()
-            if client is None:
-                logger.warning("set_dry_run requested but ControlCoordinator RPC is unavailable")
-                return
-            enabled = bool((data or {}).get("enabled", False))
-            logger.info(f"Dashboard set dry_run = {enabled}")
-            client.set_dry_run(enabled=enabled)
 
         @self.sio.event  # type: ignore[untyped-decorator]
         async def move_command(sid: str, data: dict[str, Any]) -> None:
