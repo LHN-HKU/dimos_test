@@ -64,6 +64,11 @@ class Go2Mode(str, Enum):
 class ConnectionConfig(ModuleConfig):
     ip: str = Field(default_factory=lambda m: m["g"].robot_ip)
     mode: Go2Mode = Go2Mode.DEFAULT
+    # When set, _publish_tf attaches the base_link frame to this parent as an
+    # identity transform instead of using webrtc odometry. Use this when an
+    # external SLAM (e.g. FastLio2 publishing `odom -> body`) owns the robot's
+    # pose, so the TF tree has a single source of truth.
+    tf_base_link_parent: str | None = None
 
 
 class Go2ConnectionProtocol(Protocol):
@@ -283,7 +288,7 @@ class GO2Connection(Module, Camera, Pointcloud):
         super().stop()
 
     @classmethod
-    def _odom_to_tf(cls, odom: PoseStamped) -> list[Transform]:
+    def _odom_to_tf(cls, odom: PoseStamped, base_link_parent: str | None = None) -> list[Transform]:
         camera_link = Transform(
             translation=Vector3(0.3, 0.0, 0.0),
             rotation=Quaternion(0.0, 0.0, 0.0, 1.0),
@@ -300,14 +305,24 @@ class GO2Connection(Module, Camera, Pointcloud):
             ts=odom.ts,
         )
 
-        return [
-            Transform.from_pose("base_link", odom),
-            camera_link,
-            camera_optical,
-        ]
+        if base_link_parent:
+            # An external SLAM owns the robot's pose. Attach base_link to the
+            # given frame (e.g. FastLio2's `body`) as identity so the TF tree
+            # has a single source of truth.
+            base_link = Transform(
+                translation=Vector3(0.0, 0.0, 0.0),
+                rotation=Quaternion(0.0, 0.0, 0.0, 1.0),
+                frame_id=base_link_parent,
+                child_frame_id="base_link",
+                ts=odom.ts,
+            )
+        else:
+            base_link = Transform.from_pose("base_link", odom)
+
+        return [base_link, camera_link, camera_optical]
 
     def _publish_tf(self, msg: PoseStamped) -> None:
-        transforms = self._odom_to_tf(msg)
+        transforms = self._odom_to_tf(msg, self.config.tf_base_link_parent)
         self.tf.publish(*transforms)
         if self.odom.transport:
             self.odom.publish(msg)

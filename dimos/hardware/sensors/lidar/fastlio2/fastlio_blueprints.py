@@ -17,6 +17,8 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.mapping.voxels import VoxelGridMapper
+from dimos.robot.unitree.go2.connection import GO2Connection
+from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.visualization.vis_module import vis_module
 
 voxel_size = 0.05
@@ -56,6 +58,8 @@ mid360_fastlio_voxels_native = autoconnect(
 mid360_fastlio_ray_trace = autoconnect(
     FastLio2.blueprint(voxel_size=voxel_size, map_voxel_size=voxel_size, map_freq=-1),
     RayTracingVoxelMap.blueprint(voxel_size=voxel_size),
+    GO2Connection.blueprint(),
+    KeyboardTeleop.blueprint(),
     vis_module(
         "rerun",
         rerun_config={
@@ -64,4 +68,6 @@ mid360_fastlio_ray_trace = autoconnect(
             },
         },
     ),
-).global_config(n_workers=5, robot_model="mid360_fastlio2_ray_trace")
+).remappings([
+    (GO2Connection, "lidar", "go2_lidar"),
+]).global_config(n_workers=7, robot_model="mid360_fastlio2_ray_trace")

@@ -93,7 +93,7 @@ class TwistBaseAdapterRegistry:
                 module = importlib.import_module(f"dimos.hardware.drive_trains.{entry}.adapter")
                 if hasattr(module, "register"):
                     module.register(self)
-            except ImportError as e:
+            except Exception as e:
                 logger.warning(f"Skipping twist base adapter {entry}: {e}")
 
 

@@ -107,11 +107,9 @@ class LocalPlanner(Resource):
             self._current_odom = msg
 
     def start_planning(self, path: Path) -> None:
-        self.stop_planning()
-
-        self._stop_planning_event = Event()
-
         with self._lock:
+            self.stop_planning()
+            self._stop_planning_event = Event()
             self._path = path
             self._path_clearance = PathClearance(self._global_config, self._path)
             self._path_distancer = PathDistancer(self._path)
@@ -171,7 +169,9 @@ class LocalPlanner(Resource):
             current_odom = self._current_odom
 
         if path is None or path_clearance is None:
-            raise RuntimeError("No path set for local planner.")
+            # Race: a concurrent stop_planning cleared state before this thread
+            # was scheduled. The newer start_planning will spawn another thread.
+            return
 
         # Determine initial state: skip initial_rotation if already aligned.
         new_state: PlannerState = "initial_rotation"

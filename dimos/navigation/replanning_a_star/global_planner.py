@@ -346,8 +346,7 @@ class GlobalPlanner(Resource):
         self._local_planner.start_planning(resampled_path)
 
     def _find_wide_path(self, goal: Vector3, robot_pos: Vector3) -> Path | None:
-        #        sizes_to_try: list[float] = [2.2, 1.7, 1.3, 1]
-        sizes_to_try: list[float] = [1.1]
+        sizes_to_try: list[float] = [1.1, 0.9, 0.7]
 
         for size in sizes_to_try:
             distance = robot_pos.distance(goal)

@@ -29,7 +29,7 @@ try:
     import cyclonedds as _cyclonedds  # noqa: F401
 
     DDS_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception):
     DDS_AVAILABLE = False
 
 from dimos.protocol.pubsub.impl.lcmpubsub import LCM, PickleLCM, Topic as LCMTopic
