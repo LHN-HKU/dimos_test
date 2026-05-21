@@ -46,7 +46,7 @@ drone_agentic = autoconnect(
     GoogleMapsSkillContainer.blueprint(),
     OsmSkill.blueprint(),
     McpServer.blueprint(),
-    McpClient.blueprint(system_prompt=DRONE_SYSTEM_PROMPT, model="gpt-4o"),
+    McpClient.blueprint(system_prompt=DRONE_SYSTEM_PROMPT),
     WebInput.blueprint(),
 ).remappings(
     [

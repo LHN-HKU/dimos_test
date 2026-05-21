@@ -309,6 +309,13 @@ class PythonWorker:
                 )
                 self._process.terminate()
                 self._process.join(timeout=1)
+            if self._process.is_alive():
+                logger.warning(
+                    "Worker still alive after terminate, killing.",
+                    worker_id=self._worker_id,
+                )
+                self._process.kill()
+                self._process.join(timeout=1)
             self._process = None
 
 

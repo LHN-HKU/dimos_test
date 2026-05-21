@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+import os
 from queue import Empty, Queue
 from threading import Event, RLock, Thread
 import time
@@ -25,7 +27,6 @@ from langchain_core.messages import HumanMessage
 from langchain_core.messages.base import BaseMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph.state import CompiledStateGraph
-from reactivex.disposable import Disposable
 
 from dimos.agents.mcp import tool_stream
 from dimos.agents.system_prompt import SYSTEM_PROMPT
@@ -40,12 +41,37 @@ from dimos.utils.sequential_ids import SequentialIds
 
 logger = setup_logger()
 
+DEFAULT_QWEN_MODEL = "qwen-plus"
+DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+_PROXY_ENV_VARS = (
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+)
+
+
+@contextmanager
+def _without_proxy_env() -> Iterator[None]:
+    saved = {key: os.environ.pop(key) for key in _PROXY_ENV_VARS if key in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
 
 class McpClientConfig(ModuleConfig):
     system_prompt: str | None = SYSTEM_PROMPT
-    model: str = "gpt-4o"
+    model: str = DEFAULT_QWEN_MODEL
     model_fixture: str | None = None
     mcp_server_url: str = "http://localhost:9990/mcp"
+    qwen_base_url: str = os.getenv("DASH_SCOPE_BASE_URL", DEFAULT_QWEN_BASE_URL)
+    deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
 
 
 class McpClient(Module):
@@ -64,6 +90,8 @@ class McpClient(Module):
     _http_client: httpx.Client
     _seq_ids: SequentialIds
     _tool_stream_cleanup: Callable[[], None] | None
+    _human_input_cleanup: Callable[[], None] | None
+    _disabled_reason: str | None
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -78,9 +106,11 @@ class McpClient(Module):
             daemon=True,
         )
         self._stop_event = Event()
-        self._http_client = httpx.Client(timeout=120.0)
+        self._http_client = httpx.Client(timeout=120.0, trust_env=False)
         self._seq_ids = SequentialIds()
         self._tool_stream_cleanup = None
+        self._human_input_cleanup = None
+        self._disabled_reason = None
 
     def __reduce__(self) -> Any:
         return (self.__class__, (), {})
@@ -192,14 +222,22 @@ class McpClient(Module):
             args_schema=input_schema,
         )
 
-    @rpc
-    def start(self) -> None:
-        super().start()
+    def _ensure_human_input_subscription(self, *, force: bool = False) -> None:
+        if self._human_input_cleanup is not None:
+            if not force:
+                return
+            self._human_input_cleanup()
+            self._human_input_cleanup = None
 
         def _on_human_input(string: str) -> None:
             self._message_queue.put(HumanMessage(content=string))
 
-        self.register_disposable(Disposable(self.human_input.subscribe(_on_human_input)))
+        self._human_input_cleanup = self.human_input.subscribe(_on_human_input)
+
+    @rpc
+    def start(self) -> None:
+        super().start()
+        self._ensure_human_input_subscription()
 
         # Subscribe directly over LCM rather than through the server's GET
         # /mcp SSE channel.  HTTP would add a startup race: the first few
@@ -210,6 +248,9 @@ class McpClient(Module):
 
     @rpc
     def on_system_modules(self, _modules: list[RPCClient]) -> None:
+        # Streams are fully connected by this point, so force the subscription
+        # onto the real transport rather than an early local stream binding.
+        self._ensure_human_input_subscription(force=True)
         tools = self._fetch_tools()
 
         model: str | Any = self.config.model
@@ -217,13 +258,25 @@ class McpClient(Module):
             from dimos.agents.testing import MockModel
 
             model = MockModel(json_path=self.config.model_fixture)
+        else:
+            missing_key = _missing_api_key_for_model(self.config.model)
+            if missing_key is not None:
+                self._disabled_reason = f"{missing_key} is not set"
+                logger.warning(f"McpClient agent disabled: {self._disabled_reason}")
+                return
+            model = _resolve_chat_model(
+                self.config.model,
+                qwen_base_url=self.config.qwen_base_url,
+                deepseek_base_url=self.config.deepseek_base_url,
+            )
 
         with self._lock:
-            self._state_graph = create_agent(
-                model=model,
-                tools=tools,
-                system_prompt=self.config.system_prompt,
-            )
+            with _without_proxy_env():
+                self._state_graph = create_agent(
+                    model=model,
+                    tools=tools,
+                    system_prompt=self.config.system_prompt,
+                )
             if not self._thread.is_alive():
                 self._thread.start()
 
@@ -234,6 +287,9 @@ class McpClient(Module):
         if self._tool_stream_cleanup is not None:
             self._tool_stream_cleanup()
             self._tool_stream_cleanup = None
+        if self._human_input_cleanup is not None:
+            self._human_input_cleanup()
+            self._human_input_cleanup = None
         self._stop_event.set()
         if self._thread.is_alive():
             self._thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
@@ -313,7 +369,20 @@ class McpClient(Module):
             with self._lock:
                 if not self._state_graph:
                     raise ValueError("No state graph initialized")
-                self._process_message(self._state_graph, message)
+                try:
+                    self._process_message(self._state_graph, message)
+                except Exception as e:
+                    logger.error("McpClient failed to process message", exc_info=True)
+                    error_message = HumanMessage(
+                        content=(
+                            "Agent model request failed. "
+                            f"{type(e).__name__}: {e}"
+                        )
+                    )
+                    self._history.append(error_message)
+                    pretty_print_langchain_message(error_message)
+                    self.agent.publish(error_message)
+                    self.agent_idle.publish(True)
 
     def _process_message(
         self, state_graph: CompiledStateGraph[Any, Any, Any, Any], message: BaseMessage
@@ -337,14 +406,108 @@ class McpClient(Module):
 def _append_image_to_history(
     mcp_client: McpClient, func_name: str, uuid_: str, result: Any
 ) -> None:
+    visual_description = _describe_visual_artifact(result)
+    text = f"This is the artefact for the '{func_name}' tool with UUID:={uuid_}."
+    if visual_description:
+        text += (
+            "\n\nQwen vision analysis of this camera image:\n"
+            f"{visual_description}\n\n"
+            "Use this visual analysis as your direct observation of the robot camera. "
+            "Do not say you cannot inspect images when this analysis is present."
+        )
+
     mcp_client.add_message(
         HumanMessage(
             content=[
                 {
                     "type": "text",
-                    "text": f"This is the artefact for the '{func_name}' tool with UUID:={uuid_}.",
+                    "text": text,
                 },
                 result,
             ]
         )
     )
+
+
+def _describe_visual_artifact(result: Any) -> str | None:
+    if not (isinstance(result, dict) and result.get("type") == "image_url"):
+        return None
+
+    image_url = result.get("image_url")
+    if not isinstance(image_url, dict) or not image_url.get("url"):
+        return None
+
+    try:
+        from dimos.models.vl.qwen import QwenVlModel
+
+        model = QwenVlModel()
+        return model._chat_completion(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        result,
+                        {
+                            "type": "text",
+                            "text": (
+                                "Describe the robot camera image for a navigation agent. "
+                                "List visible objects, obstacles, people, doors, chairs, "
+                                "trash bins, and useful spatial relationships. Be concise "
+                                "and factual."
+                            ),
+                        },
+                    ],
+                }
+            ]
+        )
+    except Exception:
+        logger.error("Qwen vision analysis failed", exc_info=True)
+        return None
+
+
+def _missing_api_key_for_model(model: str) -> str | None:
+    if _is_qwen_model(model) and not os.environ.get("ALIBABA_API_KEY"):
+        return "ALIBABA_API_KEY"
+    if _is_deepseek_model(model) and not os.environ.get("DEEPSEEK_API_KEY"):
+        return "DEEPSEEK_API_KEY"
+    if _requires_openai_api_key(model) and not os.environ.get("OPENAI_API_KEY"):
+        return "OPENAI_API_KEY"
+    return None
+
+
+def _resolve_chat_model(model: str, qwen_base_url: str, deepseek_base_url: str) -> Any:
+    if not (_is_qwen_model(model) or _is_deepseek_model(model)):
+        return model
+
+    from langchain_openai import ChatOpenAI
+
+    if _is_qwen_model(model):
+        model_name = model.removeprefix("qwen:")
+        api_key = os.environ["ALIBABA_API_KEY"]
+        base_url = qwen_base_url
+    else:
+        model_name = model.removeprefix("deepseek:")
+        api_key = os.environ["DEEPSEEK_API_KEY"]
+        base_url = deepseek_base_url
+
+    with _without_proxy_env():
+        return ChatOpenAI(
+            model=model_name,
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.Client(trust_env=False, timeout=60.0),
+            timeout=60.0,
+            max_retries=1,
+        )
+
+
+def _is_qwen_model(model: str) -> bool:
+    return model.startswith("qwen")
+
+
+def _is_deepseek_model(model: str) -> bool:
+    return model.startswith("deepseek")
+
+
+def _requires_openai_api_key(model: str) -> bool:
+    return model.startswith("gpt-") or model.startswith("openai:")

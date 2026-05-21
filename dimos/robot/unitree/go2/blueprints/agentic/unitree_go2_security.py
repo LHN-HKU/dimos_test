@@ -17,7 +17,9 @@ from typing import Any
 
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
+from dimos.experimental.security_demo.security_module import SecurityModule
 from dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic import unitree_go2_agentic
+from dimos.robot.unitree.go2.connection import GO2Connection
 from dimos.visualization.vis_module import vis_module
 
 
@@ -84,6 +86,7 @@ _rerun_config = {
 
 unitree_go2_security = autoconnect(
     unitree_go2_agentic,
+    SecurityModule.blueprint(camera_info=GO2Connection.camera_info_static),
     vis_module(viewer_backend=global_config.viewer, rerun_config=_rerun_config),
 )
 

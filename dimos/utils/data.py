@@ -166,7 +166,10 @@ def _lfs_pull(file_path: Path, repo_root: Path) -> None:
             cwd=repo_root,
             check=True,
             env=env,
+            timeout=120,
         )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"Timed out pulling LFS file {file_path}: {e}") from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to pull LFS file {file_path}: {e}")
 

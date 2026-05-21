@@ -127,11 +127,22 @@ _with_vis = autoconnect(
 )
 
 
+def _require_robot_ip_for_webrtc() -> str | None:
+    if global_config.unitree_connection_type == "webrtc" and not global_config.robot_ip:
+        return (
+            "unitree-go2 requires --robot-ip for a real robot. "
+            "Use --robot-ip <ip>, or use --replay/--simulation for non-hardware runs."
+        )
+    return None
+
+
 unitree_go2_basic = (
     autoconnect(
         _with_vis,
         GO2Connection.blueprint(),
-    ).global_config(n_workers=4, robot_model="unitree_go2")
+    )
+    .global_config(n_workers=4, robot_model="unitree_go2")
+    .requirements(_require_robot_ip_for_webrtc)
     # we temporarily disabled sensor timestamps
     # and are derriving all timestmaps upon reception
     # this is because image webrtc stream doesn't have timestamps,

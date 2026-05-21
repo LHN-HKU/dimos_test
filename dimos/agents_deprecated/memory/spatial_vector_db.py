@@ -293,6 +293,14 @@ class SpatialVectorDB:
         """Legacy accessor for compatibility with existing code."""
         return self.visual_memory.images
 
+    def _get_text_embedding(self, text: str) -> np.ndarray:
+        if self.embedding_provider is None:
+            from dimos.agents_deprecated.memory.image_embedding import ImageEmbeddingProvider
+
+            self.embedding_provider = ImageEmbeddingProvider(model_name="clip")
+
+        return self.embedding_provider.get_text_embedding(text)
+
     def tag_location(self, location: RobotLocation) -> None:
         """
         Tag a location with a semantic name/description for text-based retrieval.
@@ -303,9 +311,13 @@ class SpatialVectorDB:
 
         location_id = location.location_id
         metadata = location.to_vector_metadata()
+        embedding = self._get_text_embedding(location.name)
 
         self.location_collection.add(
-            ids=[location_id], documents=[location.name], metadatas=[metadata]
+            ids=[location_id],
+            documents=[location.name],
+            embeddings=[embedding.tolist()],
+            metadatas=[metadata],
         )
 
     def query_tagged_location(self, query: str) -> tuple[RobotLocation | None, float]:
@@ -319,8 +331,11 @@ class SpatialVectorDB:
             The best matching RobotLocation or None if no matches found
         """
 
+        query_embedding = self._get_text_embedding(query)
         results = self.location_collection.query(
-            query_texts=[query], n_results=1, include=["metadatas", "documents", "distances"]
+            query_embeddings=[query_embedding.tolist()],
+            n_results=1,
+            include=["metadatas", "documents", "distances"],
         )
 
         if not (results and results["ids"] and len(results["ids"][0]) > 0):

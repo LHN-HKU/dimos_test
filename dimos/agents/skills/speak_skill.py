@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import threading
 import time
 
@@ -31,6 +32,7 @@ logger = setup_logger()
 class SpeakSkill(Module):
     _tts_node: OpenAITTSNode | None = None
     _audio_output: SounddeviceAudioOutput | None = None
+    _disabled_reason: str | None = None
     _audio_lock: threading.Lock = threading.Lock()
     _bg_threads: list[threading.Thread] = []
     _bg_threads_lock: threading.Lock = threading.Lock()
@@ -38,9 +40,19 @@ class SpeakSkill(Module):
     @rpc
     def start(self) -> None:
         super().start()
-        self._tts_node = OpenAITTSNode(speed=1.2, voice=Voice.ONYX)
-        self._audio_output = SounddeviceAudioOutput(sample_rate=24000)
-        self._audio_output.consume_audio(self._tts_node.emit_audio())
+        if not os.environ.get("OPENAI_API_KEY"):
+            self._disabled_reason = "OPENAI_API_KEY is not set"
+            logger.warning(f"SpeakSkill disabled: {self._disabled_reason}")
+            return
+
+        try:
+            self._tts_node = OpenAITTSNode(speed=1.2, voice=Voice.ONYX)
+            self._audio_output = SounddeviceAudioOutput(sample_rate=24000)
+            self._audio_output.consume_audio(self._tts_node.emit_audio())
+            self._disabled_reason = None
+        except Exception as e:
+            self._disabled_reason = str(e)
+            logger.warning(f"SpeakSkill disabled: {self._disabled_reason}")
 
     @rpc
     def stop(self) -> None:
@@ -69,7 +81,8 @@ class SpeakSkill(Module):
             speak("Hello, I am your robot assistant.")
         """
         if self._tts_node is None:
-            return "Error: TTS not initialized"
+            reason = self._disabled_reason or "TTS not initialized"
+            return f"Speech is unavailable: {reason}"
 
         if not blocking:
             thread = threading.Thread(

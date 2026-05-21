@@ -294,29 +294,29 @@ def run(
     if cli_config_overrides:
         kwargs["g"] = cli_config_overrides
 
-    coordinator = ModuleCoordinator.build(blueprint, kwargs)
-
     if daemon:
-        # Health check before daemonizing — catch early crashes
-        if not coordinator.health_check():
-            typer.echo("Error: health check failed — a worker process died.", err=True)
-            coordinator.stop()
-            raise typer.Exit(1)
-
-        n_modules = coordinator.n_modules
-        typer.echo(f"✓ All modules started ({n_modules} modules)")
-        typer.echo("✓ Health check passed")
-        typer.echo("✓ DimOS running in background\n")
+        typer.echo("✓ DimOS starting in background\n")
         typer.echo(f"  Run ID:    {run_id}")
         typer.echo(f"  Log:       {log_dir}")
         typer.echo("  Stop:      dimos stop")
         typer.echo("  Status:    dimos status")
 
-        coordinator.suppress_console()
-
+        # Daemonize before building modules. Building first starts worker,
+        # LCM, uvicorn, and asyncio threads; double-forking after that leaves
+        # the daemon child with only the calling thread, so services like MCP
+        # appear healthy during startup but vanish immediately afterwards.
         daemonize(log_dir)
 
-        rpyc_port = coordinator.start_rpyc_service()  # After daemonize().
+        coordinator = ModuleCoordinator.build(blueprint, kwargs)
+        coordinator.suppress_console()
+
+        if not coordinator.health_check():
+            logger.error("Error: health check failed; a worker process died.")
+            coordinator.stop()
+            raise typer.Exit(1)
+
+        logger.info("All modules started in daemon", n_modules=coordinator.n_modules)
+        rpyc_port = coordinator.start_rpyc_service()
         entry = RunEntry(
             run_id=run_id,
             pid=os.getpid(),
@@ -333,6 +333,7 @@ def run(
         install_signal_handlers(entry, coordinator)
         coordinator.loop()
     else:
+        coordinator = ModuleCoordinator.build(blueprint, kwargs)
         rpyc_port = coordinator.start_rpyc_service()
         entry = RunEntry(
             run_id=run_id,

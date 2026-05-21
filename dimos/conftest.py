@@ -13,8 +13,11 @@
 # limitations under the License.
 
 import asyncio
+import atexit
 from contextlib import suppress
 import hashlib
+import multiprocessing.forkserver
+import multiprocessing.resource_tracker
 import os
 import platform
 import tempfile
@@ -61,6 +64,7 @@ from dotenv import load_dotenv
 import pytest
 
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
+from dimos.core.coordination.python_worker import reset_forkserver_context
 
 load_dotenv()
 
@@ -146,6 +150,47 @@ _seen_threads_lock = threading.RLock()
 _before_test_threads = {}  # Map test name to set of thread IDs before test
 
 
+def _stop_multiprocessing_helpers() -> None:
+    """Stop idle multiprocessing helpers spawned by forkserver-based workers.
+
+    pytest-xdist waits for worker processes to exit at session end. Python's
+    forkserver/resource_tracker helpers can keep those workers alive after all
+    DimOS workers have been shut down, so clean them up during session teardown.
+    """
+    with suppress(Exception):
+        multiprocessing.forkserver._forkserver._stop()
+    with suppress(Exception):
+        multiprocessing.resource_tracker._resource_tracker._stop()
+    with suppress(Exception):
+        import psutil
+
+        current = psutil.Process()
+        for child in current.children(recursive=True):
+            cmdline = " ".join(child.cmdline())
+            if (
+                "multiprocessing.resource_tracker" in cmdline
+                or "multiprocessing.forkserver" in cmdline
+            ):
+                child.terminate()
+        _, alive = psutil.wait_procs(current.children(recursive=True), timeout=1.0)
+        for child in alive:
+            cmdline = " ".join(child.cmdline())
+            if (
+                "multiprocessing.resource_tracker" in cmdline
+                or "multiprocessing.forkserver" in cmdline
+            ):
+                child.kill()
+    reset_forkserver_context()
+
+
+def _stop_rerun() -> None:
+    with suppress(Exception):
+        import rerun as rr
+
+        rr.disconnect()
+        rr.rerun_shutdown()
+
+
 @pytest.fixture(scope="module")
 def dimos_cluster():
     dimos = ModuleCoordinator()
@@ -157,24 +202,16 @@ def dimos_cluster():
 
 
 @pytest.hookimpl()
-def pytest_sessionfinish(session):
-    """Track threads that exist at session start - these are not leaks."""
+def pytest_sessionfinish(session, exitstatus):
+    _stop_rerun()
+    _stop_multiprocessing_helpers()
+    atexit.register(_stop_multiprocessing_helpers)
 
-    yield
 
-    # Check for session-level thread leaks at teardown
-    final_threads = [
-        t
-        for t in threading.enumerate()
-        if t.name != "MainThread" and t.ident not in _session_threads
-    ]
-
-    if final_threads:
-        thread_info = [f"{t.name} (daemon={t.daemon})" for t in final_threads]
-        pytest.fail(
-            f"\n{len(final_threads)} thread(s) leaked during test session: {thread_info}\n"
-            "Session-scoped fixtures must clean up all threads in their teardown."
-        )
+@pytest.hookimpl()
+def pytest_unconfigure(config):
+    _stop_rerun()
+    _stop_multiprocessing_helpers()
 
 
 @pytest.fixture(autouse=True)

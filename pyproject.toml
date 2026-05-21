@@ -124,7 +124,7 @@ dependencies = [
     "toolz>=1.1.0",
     "protobuf>=6.33.5,<7",
     "psutil>=7.0.0",
-    "sqlite-vec>=0.1.6",
+    "sqlite-vec>=0.1.9",
     "lz4>=4.4.5",
     "rpyc>=6.0.0",
     "bleak>=3.0.2",
@@ -249,7 +249,7 @@ manipulation = [
 
     # Hardware SDKs
     "piper-sdk",
-    "pyrealsense2; sys_platform != 'darwin'",
+    "pyrealsense2; sys_platform != 'darwin' and (platform_machine != 'aarch64' or python_version < '3.11')",
     "xarm-python-sdk>=1.17.0",
 
     # Mesh conversion (STL/DAE → OBJ for Drake collision geometry)
@@ -390,7 +390,7 @@ tests = [
     # Misc dev tools
     "pre_commit==4.2.0",
     "watchdog>=3.0.0",
-    "md-babel-py>=1.2.0",
+    "md-babel-py>=1.1.4",
     "py-spy",
 
     # LSP

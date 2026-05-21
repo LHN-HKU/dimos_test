@@ -17,11 +17,20 @@ import json
 from queue import Empty, Queue
 from unittest.mock import MagicMock, patch
 
+import httpx
 from langchain_core.messages import HumanMessage
 from langchain_core.messages.base import BaseMessage
 import pytest
 
-from dimos.agents.mcp.mcp_client import McpClient
+from dimos.agents.mcp.mcp_client import (
+    DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_QWEN_BASE_URL,
+    DEFAULT_QWEN_MODEL,
+    McpClient,
+    _missing_api_key_for_model,
+    _resolve_chat_model,
+)
 from dimos.utils.sequential_ids import SequentialIds
 
 
@@ -108,6 +117,94 @@ def mcp_client() -> McpClient:
     client.config = MagicMock()
     client.config.mcp_server_url = "http://localhost:9990/mcp"
     return client
+
+
+def test_qwen_default_requires_alibaba_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ALIBABA_API_KEY", raising=False)
+
+    assert _missing_api_key_for_model(DEFAULT_QWEN_MODEL) == "ALIBABA_API_KEY"
+
+
+def test_qwen_model_resolves_to_proxy_free_openai_compatible_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALIBABA_API_KEY", "test-key")
+    monkeypatch.setenv("ALL_PROXY", "socks://127.0.0.1:7897/")
+    monkeypatch.setenv("HTTPS_PROXY", "socks://127.0.0.1:7897/")
+
+    with patch("langchain_openai.ChatOpenAI") as chat_openai:
+        model = _resolve_chat_model(
+            DEFAULT_QWEN_MODEL,
+            qwen_base_url=DEFAULT_QWEN_BASE_URL,
+            deepseek_base_url=DEFAULT_DEEPSEEK_BASE_URL,
+        )
+
+    assert model is chat_openai.return_value
+    chat_openai.assert_called_once()
+    kwargs = chat_openai.call_args.kwargs
+    assert kwargs["model"] == "qwen-plus"
+    assert kwargs["api_key"] == "test-key"
+    assert kwargs["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert isinstance(kwargs["http_client"], httpx.Client)
+    assert kwargs["http_client"]._trust_env is False
+    assert kwargs["timeout"] == 60.0
+    assert kwargs["max_retries"] == 1
+    kwargs["http_client"].close()
+
+
+def test_image_artifact_gets_qwen_vision_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dimos.agents.mcp import mcp_client as mcp_client_module
+    from dimos.models.vl import qwen as qwen_module
+
+    class FakeQwenVlModel:
+        def _chat_completion(self, messages):
+            content = messages[0]["content"]
+            assert content[0]["type"] == "image_url"
+            assert "robot camera" in content[1]["text"]
+            return "A trash bin is visible ahead."
+
+    messages: list[HumanMessage] = []
+    fake_client = type("FakeClient", (), {"add_message": messages.append})()
+    image_item = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,AAAA"},
+    }
+
+    monkeypatch.setattr(qwen_module, "QwenVlModel", FakeQwenVlModel)
+
+    mcp_client_module._append_image_to_history(fake_client, "observe", "uuid-1", image_item)
+
+    assert len(messages) == 1
+    text = messages[0].content[0]["text"]
+    assert "Qwen vision analysis" in text
+    assert "A trash bin is visible ahead." in text
+
+def test_deepseek_model_still_resolves_to_openai_compatible_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    with patch("langchain_openai.ChatOpenAI") as chat_openai:
+        model = _resolve_chat_model(
+            DEFAULT_DEEPSEEK_MODEL,
+            qwen_base_url=DEFAULT_QWEN_BASE_URL,
+            deepseek_base_url=DEFAULT_DEEPSEEK_BASE_URL,
+        )
+
+    assert model is chat_openai.return_value
+    kwargs = chat_openai.call_args.kwargs
+    assert kwargs["model"] == "deepseek-v4-pro"
+    assert kwargs["api_key"] == "test-key"
+    assert kwargs["base_url"] == "https://api.deepseek.com"
+    assert kwargs["timeout"] == 60.0
+    assert kwargs["max_retries"] == 1
+    kwargs["http_client"].close()
+
+
+def test_openai_model_still_requires_openai_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    assert _missing_api_key_for_model("gpt-4o") == "OPENAI_API_KEY"
 
 
 def test_fetch_tools_from_mcp_server(mcp_client: McpClient) -> None:

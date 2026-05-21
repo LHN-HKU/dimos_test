@@ -16,8 +16,8 @@ from functools import cached_property
 import os
 from typing import Any
 
+import httpx
 import numpy as np
-from openai import OpenAI
 
 from dimos.models.vl.base import VlModel, VlModelConfig
 from dimos.msgs.sensor_msgs.Image import Image
@@ -28,23 +28,49 @@ class QwenVlModelConfig(VlModelConfig):
 
     model_name: str = "qwen2.5-vl-72b-instruct"
     api_key: str | None = None
+    base_url: str | None = None
 
 
 class QwenVlModel(VlModel):
     config: QwenVlModelConfig
 
     @cached_property
-    def _client(self) -> OpenAI:
+    def _client(self) -> httpx.Client:
         api_key = self.config.api_key or os.getenv("ALIBABA_API_KEY")
         if not api_key:
             raise ValueError(
                 "Alibaba API key must be provided or set in ALIBABA_API_KEY environment variable"
             )
 
-        return OpenAI(
-            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            api_key=api_key,
+        base_url = (
+            self.config.base_url
+            or os.getenv("DASH_SCOPE_BASE_URL")
+            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
+
+        return httpx.Client(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=120.0,
+            trust_env=False,
+        )
+
+    def _chat_completion(
+        self,
+        messages: list[dict[str, Any]],
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {
+            "model": self.config.model_name,
+            "messages": messages,
+        }
+        if response_format:
+            payload["response_format"] = response_format
+
+        response = self._client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
 
     def query(self, image: Image | np.ndarray, query: str) -> str:  # type: ignore[override]
         if isinstance(image, np.ndarray):
@@ -63,8 +89,7 @@ class QwenVlModel(VlModel):
 
         img_base64 = image.to_base64()
 
-        response = self._client.chat.completions.create(
-            model=self.config.model_name,
+        return self._chat_completion(
             messages=[
                 {
                     "role": "user",
@@ -78,8 +103,6 @@ class QwenVlModel(VlModel):
                 }
             ],
         )
-
-        return response.choices[0].message.content  # type: ignore[return-value]
 
     def query_batch(
         self,
@@ -103,17 +126,15 @@ class QwenVlModel(VlModel):
         ]
         content.append({"type": "text", "text": query})
 
-        messages = [{"role": "user", "content": content}]
-        api_kwargs: dict[str, Any] = {"model": self.config.model_name, "messages": messages}
-        if response_format:
-            api_kwargs["response_format"] = response_format
-
-        response = self._client.chat.completions.create(**api_kwargs)
-        response_text = response.choices[0].message.content or ""
+        response_text = self._chat_completion(
+            messages=[{"role": "user", "content": content}],
+            response_format=response_format,
+        )
         # Return one response per image (same response since API analyzes all images together)
         return [response_text] * len(images)
 
     def stop(self) -> None:
-        """Release the OpenAI client."""
+        """Release the HTTP client."""
         if "_client" in self.__dict__:
+            self._client.close()
             del self.__dict__["_client"]

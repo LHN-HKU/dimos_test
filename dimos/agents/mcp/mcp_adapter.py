@@ -63,6 +63,11 @@ class McpAdapter:
         self.url = url
         self.timeout = timeout
 
+    def _post(self, *, json: dict[str, Any], timeout: float | None = None) -> requests.Response:
+        with requests.Session() as session:
+            session.trust_env = False
+            return session.post(self.url, json=json, timeout=timeout or self.timeout)
+
     def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Send a JSON-RPC request and return the parsed response.
 
@@ -76,7 +81,7 @@ class McpAdapter:
         if params:
             payload["params"] = params
 
-        resp = requests.post(self.url, json=payload, timeout=self.timeout)
+        resp = self._post(json=payload)
         try:
             resp.raise_for_status()
         except requests.HTTPError as e:
@@ -109,8 +114,7 @@ class McpAdapter:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                resp = requests.post(
-                    self.url,
+                resp = self._post(
                     json={"jsonrpc": "2.0", "id": "probe", "method": "initialize"},
                     timeout=2,
                 )
@@ -126,8 +130,7 @@ class McpAdapter:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                requests.post(
-                    self.url,
+                self._post(
                     json={"jsonrpc": "2.0", "id": "probe", "method": "initialize"},
                     timeout=1,
                 )

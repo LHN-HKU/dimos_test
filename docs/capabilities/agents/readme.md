@@ -17,7 +17,7 @@ Human Input ──→ Agent ──→ Skill Calls ──→ Robot
 - `agent: Out[BaseMessage]`: publishes agent responses (text, tool calls, images)
 - `agent_idle: Out[bool]`: signals when the agent is waiting for input
 
-The agent uses LangGraph with a configurable LLM. The default is `gpt-4o` and you need to provide an `OPENAI_API_KEY` environment variable. On startup, it discovers all `@skill`-annotated methods across deployed modules via RPC and exposes them as LangChain tools.
+The agent uses LangGraph with a configurable LLM. The default is `qwen-plus` through the DashScope OpenAI-compatible API, and you need to provide an `ALIBABA_API_KEY` environment variable. On startup, it discovers all `@skill`-annotated methods across deployed modules via RPC and exposes them as LangChain tools.
 
 ## Skills
 
@@ -86,6 +86,9 @@ dimos mcp status                                    # Server status
 
 | Config | Model | Notes |
 |--------|-------|-------|
-| Default | `gpt-4o` | Best quality, requires `OPENAI_API_KEY` |
+| Default | `qwen-plus` | DashScope API, requires `ALIBABA_API_KEY` |
+| `qwen-max` | DashScope API | Higher-capability Qwen option, requires `ALIBABA_API_KEY` |
+| `deepseek-v4-pro` | DeepSeek API | Requires `DEEPSEEK_API_KEY` |
+| `deepseek-v4-flash` | DeepSeek API | Lower-latency/cost V4 option, requires `DEEPSEEK_API_KEY` |
 | `ollama:llama3.1` | Local Ollama | Requires `ollama serve` running |
 | Custom | Any LangChain-compatible | Set via `McpClient.blueprint(model="...")` |
